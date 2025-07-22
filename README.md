@@ -13,15 +13,16 @@ DataFactory 是一个简单的 Python 框架，为高能物理（HEP）中的数
 
 ## 安装
 
-确保您已安装 Python 3.6+ 和 ROOT（带有 PyROOT 支持）。
-
+1. 确保您已安装 Python 3.6+ 和 ROOT（带有 PyROOT 支持）。
+2. 目前该工具仍在边用边开发的过程中，采用 Editable Mode 安装。
 ```bash
 # 克隆仓库
 git clone https://github.com/yourusername/datafactory.git
 cd datafactory
 
 # 安装依赖
-pip install numpy matplotlib scikit-hep scipy
+conda activate <your_env>
+pip install -e .
 ```
 
 ## 项目结构

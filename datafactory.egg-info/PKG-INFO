@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: datafactory
+Version: 0.1.0
+Summary: A small example package
+Author-email: Eugene Carter <xxxx@outlook.com>
+Project-URL: Homepage, https://github.com/Cyz-97/datafactory
+Project-URL: Issues, https://github.com/Cyz-97/datafactory/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Requires-Dist: hepunits>=2.3.6
+Requires-Dist: matplotlib>=3.10.3
+Requires-Dist: numpy>=2.2.6
+Requires-Dist: pandas==2.3.1
+Requires-Dist: scipy>=1.16.0
