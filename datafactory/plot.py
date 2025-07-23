@@ -5,8 +5,13 @@ import ROOT as R
 
 import numpy as np
 import matplotlib.pyplot as plt
+import os 
 # plt.style.use('HadTauAlg-00-01/script/datafactory/style.mplstyle')
 
+def apply_style():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    style_path = os.path.join(script_dir, 'style.mplstyle')
+    plt.style.use(style_path)
 
 
 def compare_mc_data(stack_mc, data, **kargs):
@@ -28,7 +33,6 @@ def compare_mc_data(stack_mc, data, **kargs):
     返回:
         None
     """
-    import os 
     from metadata import get_color
     import numpy as np
     import matplotlib.pyplot as plt

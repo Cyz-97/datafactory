@@ -28,9 +28,9 @@ def ensure_parent_directory(path):
 @dataclass
 class CutFlow:
     name: str
-    list_bystander_: Dict[str, Tuple]
-    formular_: str
-    latex_: str = field(default_factory=lambda: r"\mathrm{name}")
+    list_bystander: Dict[str, Tuple]
+    formular: str = field(init=True, repr = False)
+    latex: str = field(default_factory=lambda: r"\mathrm{name}")
 
     # Runtime attributes (not in __init__)
     sample_init: Any = field(init=False, repr=False)
@@ -46,9 +46,9 @@ class CutFlow:
         
         属性:
             name: 切选名称 (str)
-            list_bystander_: 旁观者分支名称与分箱配置的映射字典 (Dict[str, Tuple])
-            formular_: ROOT RDataFrame 过滤公式 (str)
-            latex_: 可选的LaTeX格式显示名称 (str)
+            list_bystander: 旁观者分支名称与分箱配置的映射字典 (Dict[str, Tuple])
+            formular: ROOT RDataFrame 过滤公式 (str)
+            latex: 可选的LaTeX格式显示名称 (str)
         
         运行时属性 (不在__init__中初始化):
             sample_init: 初始样本
@@ -64,16 +64,16 @@ class CutFlow:
             apply_on_rdf: 在RDataFrame样本上应用切选流程
             get_latex: 获取LaTeX格式名称
         """    
-        if self.latex_ == r"\mathrm{name}":
-            self.latex_ = fr"\mathrm{{{self.name}}}"
+        if self.latex == r"\mathrm{name}":
+            self.latex = fr"\mathrm{{{self.name}}}"
 
     def copy(self) -> 'CutFlow':
         """Create a deep copy of the CutFlow instance"""
         return CutFlow(
             name=self.name,
-            list_bystander_=self.list_bystander_.copy(),
-            formular_=self.formular_,
-            latex_=self.latex_
+            list_bystander=self.list_bystander.copy(),
+            formular=self.formular,
+            latex=self.latex
         )
 
     def apply_on_rdf(self, sample: Any) -> None:
@@ -84,21 +84,21 @@ class CutFlow:
             sample: Input ROOT RDataFrame sample
         """
         self.sample_init = R.RDF.AsRNode(sample)
-        self.sample_final = self.sample_init.Filter(self.formular_, self.name)
+        self.sample_final = self.sample_init.Filter(self.formular, self.name)
         
         # Initialize 1D/2D histograms
         self.dir_bystander_hist_init = {
             name: (self.sample_init.Histo1D(("", "", *binning), name) 
                    if isinstance(name, str) 
                    else self.sample_init.Histo2D(("", "", *binning), *name))
-            for name, binning in self.list_bystander_.items()
+            for name, binning in self.list_bystander.items()
         }
         
         self.dir_bystander_hist_final = {
             name: (self.sample_final.Histo1D(("", "", *binning), name) 
                    if isinstance(name, str) 
                    else self.sample_final.Histo2D(("", "", *binning), *name))
-            for name, binning in self.list_bystander_.items()
+            for name, binning in self.list_bystander.items()
         }
         
         self.count_init = self.sample_init.Count()
@@ -106,7 +106,7 @@ class CutFlow:
 
         
     def get_latex(self):
-        return self.latex_
+        return self.latex
 
 
 @dataclass
@@ -291,7 +291,7 @@ class RDFStaff(Staff):
                         cut_df.GetColumnNames(), opts_cut)
         with R.TFile(path, "update") as outfile:
             for cut in self.cuts:
-                for bystander_name in cut.list_bystander_:
+                for bystander_name in cut.list_bystander:
                     if isinstance(bystander_name, str):
                         hist_name = bystander_name + "_" + cut.name
                     elif len(bystander_name) == 2:  # 2D plot
@@ -447,6 +447,7 @@ class RDFFactory(Factory):
         """Validate inputs and load samples after initialization"""
         self._validate_inputs()
         self.load()
+        self.set_cuts([])
 
     def _validate_inputs(self):
         """Check consistency between path and cross section dictionaries"""
@@ -485,10 +486,11 @@ class RDFFactory(Factory):
                                             type = self.type_dict.get(key, StaffType.other))
             
         # Divide sample into components basing on a set of cuts
-        for key, value in self.classify_dict.items():
-            if (len(value) != 0):
-                self.staff_dict[key].rdf = self.staff_dict[
-                    key].rdf.Filter(value, "preprocess: ")
+        #for key, value in self.classify_dict.items():
+        #    print(value)
+        #    if (len(value) != 0):
+        #        self.staff_dict[key].rdf = self.staff_dict[
+        #            key].rdf.Filter(value, "preprocess: ")
 
     def define(self, branch_name: str, formula_str: str):
         """
@@ -507,7 +509,7 @@ class RDFFactory(Factory):
             A list of event selection cuts.
         """
         for key, value in self.staff_dict.items():
-            value.set_cuts(cuts)
+            value.set_cuts( self.classify_dict.get(key, []) + cuts)
 
     def get_hist(self, func, log=True):
         """
