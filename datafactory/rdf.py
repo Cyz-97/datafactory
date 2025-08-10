@@ -508,6 +508,7 @@ class RDFFactory(Factory):
         cuts: (list)
             A list of event selection cuts.
         """
+        self.cuts = cuts
         for key, value in self.staff_dict.items():
             value.set_cuts( self.classify_dict.get(key, []) + cuts)
 
@@ -549,6 +550,7 @@ class RDFFactory(Factory):
         ROOT.THStack object
             The stacked histogram of the final selected events.
         """
+        self.set_cuts(self.cuts)
         hists_dict = {i: self.staff_dict[i].get_histstaff(
             func) for i in self.staff_dict.keys() if not self.staff_dict[i].empty()}
         res = HistFactory(staff_dict=hists_dict, type_dict=self.type_dict)

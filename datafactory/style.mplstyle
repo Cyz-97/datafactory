@@ -222,7 +222,7 @@ axes.prop_cycle : (cycler('color', ["0d49fb", "e6091c", "26eb47", "8936df", "fec
 #axes.prop_cycle : cycler('color', ['EE7733', '0077BB', '33BBEE', 'EE3377', 'CC3311', '009988', 'BBBBBB'])
 
 axes.autolimit_mode : round_numbers
-axes.xmargin        : 0.1  # x margin.  See `axes.Axes.margins`
+axes.xmargin        : 0.  # x margin.  See `axes.Axes.margins`
 axes.ymargin        : 0.1  # y margin See `axes.Axes.margins`
 axes.spines.bottom  : True
 axes.spines.left    : True

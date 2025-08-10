@@ -167,7 +167,7 @@ class HistStaff(Staff):
             raise Exception("Invalid dimension for division.")
 
         self._get_value(self)
-        self._get_value(other.histogram)
+        other._get_value(other.histogram)
 
         res = HistStaff(name="sum", histogram=self.histogram.Clone())
         res.histogram.Add(other.histogram, -1)
@@ -217,7 +217,6 @@ class HistStaff(Staff):
         self._get_value(self)
         self._get_value(other)
 
-        print(other.histogram)
         eff_hist = R.TGraphAsymmErrors(self.histogram)
         eff_hist.Divide(self.histogram, other.histogram,
                         "cl=0.683 b(1,1) mode")
@@ -311,6 +310,26 @@ class HistFactory(Staff):
     def __copy__(self):
         return HistFactory(staff_dict={key: copy(val) for key, val in self.staff_dict.items()},
                            type_dict = deepcopy(self.type_dict))
+
+    def __sub__(self, other: Dict[str, Any] | float) -> Self:
+        res = copy(self)
+        
+        for name, staff in res.staff_dict.items():
+            res.staff_dict[name] -= other.staff_dict[name]
+        return res
+
+    def __truediv__(self, other: Dict[str, Any] | float) -> Self:
+        res = copy(self)
+        if isinstance(other, Staff):
+            for name, staff in res.staff_dict.items():
+                res.staff_dict[name] /= other
+        elif isinstance(other, Factory):
+            for name, staff in res.staff_dict.items():
+                res.staff_dict[name] /= other.staff_dict[name]
+        else:
+            raise ValueError("__truediv__: Undefined division")
+
+        return res
 
     def __mul__(self, other: Dict[str, Any] | float) -> Self:
         res = copy(self)
