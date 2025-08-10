@@ -210,7 +210,7 @@ def compare_mc_data(stack_mc, data, **kargs):
                 transform = fig.transFigure)
 
     # 设置 x 轴和 y 轴标签以及范围
-    ax2.set(xlabel = xlabel, ylabel = r"Data/MC",
+    ax2.set(xlabel = xlabel, ylabel = r"$\text{Data/MC}$",
             xlim = xlim, ylim = (0.5, 1.5))
     
     # 添加箭头指示超出 ylim 范围的点

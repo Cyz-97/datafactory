@@ -167,7 +167,7 @@ class HistStaff(Staff):
             raise Exception("Invalid dimension for division.")
 
         self._get_value(self)
-        other._get_value(other.histogram)
+        other._get_value(other)
 
         res = HistStaff(name="sum", histogram=self.histogram.Clone())
         res.histogram.Add(other.histogram, -1)
@@ -249,6 +249,12 @@ class HistStaff(Staff):
                                      concatenate_yerr),
                         type=self.type)
         return res
+
+    def norm_to(self, count: float):
+        self.histogram.Scale(count / self.histogram.Integral())
+        
+    def get_norm_factor(self, count: float):
+        return count / self.histogram.Integral()
 
 
 @dataclass
@@ -343,5 +349,18 @@ class HistFactory(Staff):
             
             for name, staff in res.staff_dict.items():
                 res.staff_dict[name] *= other[name]
+
+        return res
+
+    def norm_to(self, count_dict: int | float):
+        for name, staff in self.staff_dict.items():
+            if name in count_dict.keys():
+                staff.norm_to(count_dict[name])
+
+    def get_norm_factor(self, count_dict: int | float):
+        res = {}
+        for name, staff in self.staff_dict.items():
+            if name in count_dict.keys():
+                res[name] = staff.get_norm_factor(count_dict[name])
 
         return res
