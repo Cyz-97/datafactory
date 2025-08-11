@@ -252,3 +252,159 @@ def compare_mc_data(stack_mc, data, **kargs):
 
     # 显示图片
     return ax1, ax2
+
+
+#========================= 
+#          2D Plot       #
+#=========================
+def project_2d_histogram(hist, slice_axis, slice_num):
+    """
+    将二维直方图沿一个轴均匀切片，并将结果投影到另一个轴上。
+
+    参数:
+    ----------
+    hist : tuple
+        一个包含 (x_edges, y_edges, counts) 的元组。
+        - x_edges (array-like): x轴的箱体边界。
+        - y_edges (array-like): y轴的箱体边界。
+        - counts (2D array-like): 直方图的计数值，形状应为 (len(y_edges)-1, len(x_edges)-1)。
+          注意：如果使用 np.histogram2d，其输出的 counts 数组需要转置。
+    slice_axis : {'x', 'y'}
+        定义切片的坐标轴。
+    slice_num : int
+        要将 slice_axis 分成的切片数量。
+
+    返回:
+    -------
+    dict
+        一个字典，其中键是切片范围的字符串表示，值是表示一维直方图的元组 (bin_edges, counts)。
+    """
+    x_edges, y_edges, counts = hist
+    counts = np.asarray(counts)
+
+    # 验证 counts 数组的形状
+    expected_shape = (len(y_edges) - 1, len(x_edges) - 1)
+    if counts.shape != expected_shape:
+        raise ValueError(
+            f"counts 的形状 {counts.shape} 与箱体边界不匹配 "
+            f"（期望形状: {expected_shape}）。"
+            "如果 counts 来自 np.histogram2d，请先将其转置。"
+        )
+
+    projected_hists = {}
+
+    if slice_axis == 'y':
+        slicing_edges = y_edges
+        projection_edges = x_edges
+        sum_axis = 0  # 沿y轴对箱体求和
+    elif slice_axis == 'x':
+        slicing_edges = x_edges
+        projection_edges = y_edges
+        sum_axis = 1  # 沿x轴对箱体求和
+    else:
+        raise ValueError("slice_axis 必须是 'x' 或 'y'")
+
+    # 根据 slice_num 自动生成切片范围
+    slice_min, slice_max = slicing_edges[0], slicing_edges[-1]
+    slice_boundaries = np.linspace(slice_min, slice_max, slice_num + 1)
+    slice_ranges = list(zip(slice_boundaries[:-1], slice_boundaries[1:]))
+
+    for v_min, v_max in slice_ranges:
+        # 查找与切片范围对应的箱体索引
+        start_idx = np.searchsorted(slicing_edges, v_min, side='left')
+        end_idx = np.searchsorted(slicing_edges, v_max, side='right')
+
+        if start_idx >= end_idx:
+            continue
+
+        # 选择切片并投影
+        if slice_axis == 'y':
+            data_slice = counts[start_idx:end_idx, :]
+        else:  # slice_axis == 'x'
+            data_slice = counts[:, start_idx:end_idx]
+        
+        projected_counts = np.sum(data_slice, axis=sum_axis)
+        
+        # 准备输出
+        key = f"{v_min:.1f} to {v_max:.1f}"
+        projected_hists[key] = (projection_edges, projected_counts)
+
+    return projected_hists
+
+
+def plot_projections(projection_groups, slice_axis_name, xlabel, normalize_to=None, **kwargs):
+    """
+    绘制多组一维投影直方图的对比图。
+
+    参数:
+    ----------
+    projection_groups : dict
+        一个字典，键是组的标签（如 "Data", "MC"），值是 project_2d_histogram 返回的字典。
+    slice_axis_name : str
+        切片轴的名称（如 "Truth", "Reco"），用于生成标签。
+    normalize_to : float, optional
+        如果提供，所有直方图的面积将被归一化到此值。默认为 None（不归一化）。
+    **kwargs :
+        传递给 plt.figure 的其他关键字参数，例如 figsize。
+    """
+    if not projection_groups:
+        print("Warning: projection_groups 字典为空，无法绘图。")
+        return
+
+    first_group = next(iter(projection_groups.values()))
+    slice_keys = list(first_group.keys())
+    num_plots = len(slice_keys)
+
+    # 1. 创建纵向排列、共享x轴的子图
+    fig, axes = plt.subplots(num_plots, 1, sharex=True,
+                             gridspec_kw={"hspace": 0.3}, **kwargs)
+    axes = np.atleast_1d(axes).flatten()
+
+    for i, slice_key in enumerate(slice_keys):
+        ax = axes[-i-1]
+        for group_label, projections in projection_groups.items():
+            if slice_key not in projections:
+                continue
+
+            edges, counts = projections[slice_key]
+            
+            if normalize_to is not None:
+                bin_widths = np.diff(edges)
+                integral = np.sum(counts)
+                if integral > 0:
+                    scale = normalize_to / integral
+                    counts = counts * scale
+            
+            ax.stairs(counts, edges, label=group_label, fill=False)
+
+        # 2. 将切片范围用text标注在子图里
+        v_min_str, v_max_str = slice_key.split(' to ')
+        label_text = slice_axis_name + fr"$\in ({v_min_str}, {v_max_str})$"
+        ax.text(1, 1.01, label_text, transform=ax.transAxes,
+                fontsize='x-small', ha='right', va='bottom',)
+
+        ax.set(ylim = (0,None))
+        ax.yaxis.set_major_locator(plt.MaxNLocator(2))
+        ax.yaxis.set_label_coords(-0.1, 0.5)
+    axes[0].legend()
+    # 3. 共用x轴，只在最下方的图标注xlabel
+    axes[-1].set_xlabel(xlabel)
+    fig.supylabel(fr"$\text{{Counts (Norm. to {normalize_to})}}$" if normalize_to is not None else r"$\text{Counts}$")
+
+    # 调整子图间距
+    plt.subplots_adjust(hspace=0.1)
+    return fig
+
+def plot_2d_slides(hist: HistFactory, slice_axis, slice_num, 
+                   slice_axis_name, xlabel, normalize_to=None, **kwargs):
+    if isinstance(hist, HistFactory):
+        groups = {}
+        for key, val in hist.staff_dict.items():
+            groups[key] = project_2d_histogram(val.get_numpy(), slice_axis, slice_num)
+
+        return plot_projections(groups, slice_axis_name, xlabel, normalize_to=normalize_to, **kwargs)
+    elif isinstance(hist, HistStaff):
+        groups = {
+            hist.name: project_2d_histogram(hist.histogram, slice_axis, slice_num)
+        }
+        return plot_projections(groups, slice_axis_name, xlabel, normalize_to=normalize_to, **kwargs)
