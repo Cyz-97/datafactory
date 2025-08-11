@@ -258,17 +258,17 @@ class HistStaff(Staff):
 
 
 @dataclass
-class HistFactory(Staff):
-    staff_dict: Dict[str, HistStaff] = field(default=None, repr=False)
+class HistFactory(Factory):
+    staff_dict: Dict[str, HistStaff] = field(default=None, repr=True)
     path_dict: Dict[str, str] = field(default=None, repr=False)
-    type_dict: Dict[str, StaffType] = field(default_factory=dict({}))
+    type_dict: Dict[str, StaffType] = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
         self.load()
 
     def load(self):
         if self.staff_dict is not None:
-            print(self.staff_dict)
+            # print(self.staff_dict)
             pass
         elif self.path_dict is not None:
             self.staff_dict = {}
