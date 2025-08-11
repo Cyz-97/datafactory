@@ -76,18 +76,18 @@ def fit_mc_data(mc_hist, data_hist, artificial_model = False):
                         R.RooArgList(list(pdf_mc.values()) + parameterize_model),
                         R.RooArgList(list(n_mc.values()) + param_model_yield)
                         )
-    fit_result = model.fitTo(rdh_data, R.RooFit.Save(), R.RooFit.PrintLevel(-1), R.RooFit.Verbose(0), R.RooFit.Verbose(False))
-    frame = x.frame(R.RooFit.Title("Fit to data"))
-    rdh_data.plotOn(frame)
-    model.plotOn(frame)
-    i = 0
-    for key, value in pdf_mc.items():
-        model.plotOn(frame, R.RooFit.Components(f"pdf_{key}"), R.RooFit.LineStyle(R.kDashed), R.RooFit.LineColor(R.kRed + i))
-        i+=1
-    model.plotOn(frame, R.RooFit.Components("pdf_artificial_bkg"), R.RooFit.LineStyle(R.kDashed), R.RooFit.LineColor(R.kBlue))
-    c1 = R.TCanvas()
-    frame.Draw()
-    c1.BuildLegend()
-    # c1.SetLogy()
-    c1.Draw()
-    return fit_result, c1, parameterize_model, fuck_roofit_param(fit_result)
+    fit_result = model.fitTo(rdh_data, R.RooFit.Save(), R.RooFit.PrintLevel(-1), R.RooFit.Verbose(False), R.RooFit.Verbose(False))
+    # frame = x.frame(R.RooFit.Title("Fit to data"))
+    # rdh_data.plotOn(frame)
+    # model.plotOn(frame)
+    # i = 0
+    # for key, value in pdf_mc.items():
+    #     model.plotOn(frame, R.RooFit.Components(f"pdf_{key}"), R.RooFit.LineStyle(R.kDashed), R.RooFit.LineColor(R.kRed + i))
+    #     i+=1
+    # model.plotOn(frame, R.RooFit.Components("pdf_artificial_bkg"), R.RooFit.LineStyle(R.kDashed), R.RooFit.LineColor(R.kBlue))
+    # c1 = R.TCanvas()
+    # frame.Draw()
+    # c1.BuildLegend()
+    # # c1.SetLogy()
+    # c1.Draw()
+    return fit_result, parameterize_model, fuck_roofit_param(fit_result)

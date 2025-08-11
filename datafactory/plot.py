@@ -67,7 +67,7 @@ def compare_mc_data(stack_mc, data, **kargs):
     # 设置图片大小
     figsize = kargs.get("figsize", (4,4))
     # 是否在 pull plot 里放 chi2
-    plot_chi2 = kargs.get("plot_chi2", None)
+    plot_chi2_pos = kargs.get("plot_chi2_pos", None)
         
     # 将 TH1F 对象转换为 numpy 数组
     x_data, y_data, yerr_data, x_edge_data = data.get_numpy()
@@ -204,10 +204,10 @@ def compare_mc_data(stack_mc, data, **kargs):
                marker = "o", ms = 1.5, color = "black", ls = "", lw = 0.4)
 
     # 在图中添加 chi2 信息
-    if plot_chi2 is not None:
-        ax2.text(plot_chi2[0], plot_chi2[1], fr"$\chi^2/N_{{\text{{bins}}}} = {chi2/len(x_mc):.3f}$",
+    if plot_chi2_pos is not None:
+        ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], fr"$\chi^2/N_{{\text{{bins}}}} = {chi2/len(x_mc):.3f}$",
                 fontsize = "x-small", horizontalalignment='right', verticalalignment='top',
-                transform = fig.transFigure)
+                transform = ax2.transAxes)
 
     # 设置 x 轴和 y 轴标签以及范围
     ax2.set(xlabel = xlabel, ylabel = r"$\text{Data/MC}$",
