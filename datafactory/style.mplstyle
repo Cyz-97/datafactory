@@ -185,7 +185,7 @@ axes.labelsize      : medium  # fontsize of the x any y labels
 axes.labelpad       : 5.0     # space between label and axis
 axes.labelweight    : normal  # weight of the x and y labels
 axes.labelcolor     : k
-axes.axisbelow      : False   # whether axis gridlines and ticks are below
+axes.axisbelow      : True   # whether axis gridlines and ticks are below
                               # the axes elements (lines, text, etc)
 
 axes.formatter.limits : -2, 3 # use scientific notation if log10
@@ -324,7 +324,7 @@ figure.frameon : True
 # The figure subplot parameters.  All dimensions are a fraction of the
 # figure width or height
 figure.subplot.left    : 0.15  # the left side of the subplots of the figure
-# figure.subplot.right   : 0.93    # the right side of the subplots of the figure
+figure.subplot.right   : 0.95    # the right side of the subplots of the figure
 figure.subplot.bottom  : 0.15    # the bottom of the subplots of the figure
 figure.subplot.top     : 0.93    # the top of the subplots of the figure
 figure.subplot.wspace  : 0.1    # the amount of width reserved for space between subplots,

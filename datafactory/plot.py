@@ -383,16 +383,14 @@ def plot_projections(projection_groups, slice_axis_name, xlabel, normalize_to=No
         ax.text(1, 1.01, label_text, transform=ax.transAxes,
                 fontsize='x-small', ha='right', va='bottom',)
 
-        ax.set(ylim = (0,None))
         ax.yaxis.set_major_locator(plt.MaxNLocator(2))
         ax.yaxis.set_label_coords(-0.1, 0.5)
     axes[0].legend()
     # 3. 共用x轴，只在最下方的图标注xlabel
     axes[-1].set_xlabel(xlabel)
+    # 4. 共用y轴，只标注一个ylabel
     fig.supylabel(fr"$\text{{Counts (Norm. to {normalize_to})}}$" if normalize_to is not None else r"$\text{Counts}$")
 
-    # 调整子图间距
-    plt.subplots_adjust(hspace=0.1)
     return fig
 
 def plot_2d_slides(hist: HistFactory, slice_axis, slice_num, 
