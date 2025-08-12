@@ -59,7 +59,7 @@ def fit_mc_data(mc_hist, data_hist, artificial_model = False):
     # 3. Convert to PDFs
     pdf_mc = {key: R.RooHistPdf(f"pdf_{key}", f"pdf_{key}", R.RooArgList(x), value) for key, value in rdh_mc.items()}
     # 5. Fit fractions (or yields)
-    n_mc = {key: R.RooRealVar(f"n_{key}", f"n_{key}", 100, 0, 1e6) for key, value in pdf_mc.items()}
+    n_mc = {key: R.RooRealVar(f"n_{key}", f"n_{key}", mc_hist.staff_dict[key].histogram.Integral(), 0, mc_hist.staff_dict[key].histogram.Integral()*1e4) for key, value in pdf_mc.items()}
     if artificial_model:
         a0 = R.RooRealVar("mean", "mean", 1.6854, 1.5, 1.8)
         a1 = R.RooRealVar("sigma", "sigma", 0.1, 0, 0.2)
