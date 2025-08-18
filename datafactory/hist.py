@@ -158,7 +158,7 @@ class HistStaff(Staff):
         self._get_value(self)
         self._get_value(other)
 
-        res = HistStaff(name="sum", histogram=self.histogram.Clone())
+        res = copy(self)
         res.histogram.Add(other.histogram)
         return res
 
@@ -169,7 +169,7 @@ class HistStaff(Staff):
         self._get_value(self)
         other._get_value(other)
 
-        res = HistStaff(name="sum", histogram=self.histogram.Clone())
+        res = copy(self)
         res.histogram.Add(other.histogram, -1)
         return res
 
@@ -180,9 +180,9 @@ class HistStaff(Staff):
         
         res = copy(self)
         if isinstance(other, float):
-            print(res.histogram.Integral())
+            # print(res.histogram.Integral())
             res.histogram.Scale(other)
-            print(res.histogram.Integral())
+            # print(res.histogram.Integral())
         elif isinstance(other, HistStaff):
             if self.dimension != other.dimension:
                 raise Exception("Invalid dimension for division.")
@@ -200,18 +200,20 @@ class HistStaff(Staff):
             raise Exception("Invalid dimension for division.")
 
         if isinstance(other, float):
-            res = HistStaff(name="quotient", histogram=self.histogram.Clone())
+            res = copy(self)
             res.histogram.Scale(1/other)
         elif isinstance(other, type(self)):
-                res = HistStaff(name="sum", histogram=self.histogram.Clone())
-                res.histogram.Divide(other.histogram)
+            res = copy(self)
+            res.histogram.Divide(other.histogram)
         else:
             raise Exception(f"Invalid type for other: {type(other)}")
         return res
     
     def __copy__(self):
         self._get_value(self)
-        return HistStaff(name=self.name, histogram=self.histogram.Clone())
+        return HistStaff(name=self.name, 
+                         histogram=self.histogram.Clone(),
+                         type = self.type)
     
     def get_eff(self, other: Self):
         self._get_value(self)
@@ -273,7 +275,7 @@ class HistFactory(Factory):
         elif self.path_dict is not None:
             self.staff_dict = {}
             for name, path in self.path_dict.items():
-                print(name)
+                # print(name)
                 self.staff_dict[name] = HistStaff(name=name,
                                                   path=path,
                                                   type=self.type_dict.get(name, StaffType.other))
@@ -288,17 +290,16 @@ class HistFactory(Factory):
     def get_numpy(self):
         return {key: val.get_numpy() for key, val in self.staff_dict.items()}
 
-    def sum(self, type_list: List[StaffType] = [StaffType.signal, StaffType.background, StaffType.data]) -> HistStaff:
+    def sum(self, type_list: List[StaffType] = [StaffType.signal, StaffType.background]) -> HistStaff:
+        self._get_value()
         res = None
+
         for name, staff in self.staff_dict.items():
             if staff.type not in type_list:
-                print(name, staff.type, type_list)
                 continue
             if res is None:
-                print(name, staff.type, type_list)
                 res = deepcopy(staff)
             else:
-                print(name, staff.type, type_list)
                 res += staff
         return res
 
