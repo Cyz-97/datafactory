@@ -14,7 +14,7 @@ def apply_style():
     plt.style.use(style_path)
 
 
-def compare_mc_data(stack_mc, data, **kargs):
+def compare_mc_data(stack_mc, data, xlabel, **kargs):
     """
     绘制蒙特卡洛数据与实际数据的对比图。
 
@@ -50,8 +50,6 @@ def compare_mc_data(stack_mc, data, **kargs):
     ylim = kargs.get("ylim", None)
     # 获取 y 轴标度，如果未提供则默认为 linear
     yscale = kargs.get("yscale", "linear")
-    # 获取 x 轴标签，如果未提供则默认为 r"$s ~\mathrm{[GeV^{2}]}$"
-    xlabel = kargs.get("xlabel", r"$s ~\mathrm{[GeV^{2}]}$")
     # 获取 y 轴标签，如果未提供则默认为 r"$\mathrm{Count}$"
     ylabel = kargs.get("ylabel", r"$\mathrm{Count}$")
     # 获取 y 轴标签，如果未提供则默认为 r"$\mathrm{Count}$"
@@ -139,10 +137,10 @@ def compare_mc_data(stack_mc, data, **kargs):
             bottom = baseline - baseline_err/2, 
             hatch = "//////////", hatch_linewidth = 0.6, 
             fill = False, lw = 0, ls = "", 
-            facecolor = "gray", alpha = 0.6, label = "MC error")
+            facecolor = "gray", alpha = 0.6, label = r"$\text{MC error}$")
     # 绘制实际数据的误差棒图
     ax1.errorbar(x_data, y_data_norm, xerr = 0, yerr = yerr_data_norm,
-            marker = "o", ms = 1.5, color = "black", label = "Data", ls = "", lw = 0.4)
+            marker = "o", ms = 1.5, color = "black", label = r"$\text{Data}$", ls = "", lw = 0.4)
     
     # 计算 MC data 的 chi2
     chi2 = np.sum(
