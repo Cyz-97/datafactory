@@ -6,6 +6,7 @@ from hepunits import MeV, GeV, invpb, invnb, invfb, nb, pb, fb
 
 import ROOT as R
 
+
 def ensure_parent_directory(path):
     """
     确保指定路径的父目录存在，如果不存在则创建
@@ -42,26 +43,26 @@ class CutFlow:
 
     def __post_init__(self):
         """
-        CutFlow 数据类，用于管理 ROOT RDataFrame 分析中的切选流程。
+        CutFlow 数据类，用于管理 ROOT RDataFrame 分析中的cut流程。
         
         属性:
-            name: 切选名称 (str)
+            name: 选择条件名称 (str)
             list_bystander: 旁观者分支名称与分箱配置的映射字典 (Dict[str, Tuple])
             formular: ROOT RDataFrame 过滤公式 (str)
             latex: 可选的LaTeX格式显示名称 (str)
         
         运行时属性 (不在__init__中初始化):
             sample_init: 初始样本
-            sample_final: 切选后样本  
+            sample_final: cut后样本  
             dir_bystander_hist_init: 初始旁观者直方图字典
-            dir_bystander_hist_final: 切选后旁观者直方图字典
+            dir_bystander_hist_final: cut后旁观者直方图字典
             count_init: 初始计数
-            count_final: 切选后计数
+            count_final: cut后计数
         
         方法:
             __post_init__: 自动生成默认latex名称（如果未提供）
             copy: 创建CutFlow实例的深拷贝
-            apply_on_rdf: 在RDataFrame样本上应用切选流程
+            apply_on_rdf: 在RDataFrame样本上应用cut流程
             get_latex: 获取LaTeX格式名称
         """    
         if self.latex == r"\mathrm{name}":
@@ -226,25 +227,52 @@ class RDFStaff(Staff):
         self.pre_selection()
         # self._column_names = self.rdf.GetColumnNames()
 
+
+
     def load(self):
         # Create RDataFrame from ROOT file(s)
         if self.path in self.__REUSE_DF__:
             self.rdf = self.__REUSE_DF__[self.path]
         else:
-            try:
-                if self.range is None:
-                    self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
-                        R.RDataFrame(self.tree_name, self.path))
-                else:
-                    self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
-                        R.RDataFrame(self.tree_name, self.path)).Range(self.range)
+            chain = R.TChain(self.tree_name)
+            files_added = chain.Add(self.path)
+            if files_added > 0 and chain.GetEntries() > 0:
 
+                try:
+                    R.gErrorIgnoreLevel = R.kFatal 
+                    if self.range is None:
+                        self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
+                            R.RDataFrame(self.tree_name, self.path))
+                    else:
+                        self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
+                            R.RDataFrame(self.tree_name, self.path)).Range(self.range)
+
+                    self.rdf = self.__REUSE_DF__[self.path]
+                    self.rdf.GetColumnNames()
+                except Exception as e:
+                    # If tree or evt is not found, create a fake RDataFrame
+                    print(f"Warning: Could not find tree '{self.tree_name}' in file '{self.path}'. Creating fake RDataFrame.")
+                    self.__REUSE_DF__[self.path] = self._create_fake_rdf()
+                    self.rdf = self.__REUSE_DF__[self.path]
+                # root_file.Close()
+
+            else:
+                print(f"Warning: Tree '{self.tree_name}' not found or is empty in '{self.path}'. Creating a fake RDataFrame.")
+                self.__REUSE_DF__[self.path] = self._create_fake_rdf()
                 self.rdf = self.__REUSE_DF__[self.path]
-                self.rdf.GetColumnNames()
-            except Exception as e:
-                self.__REUSE_DF__[self.path] = None
-                self.rdf = self.__REUSE_DF__[self.path]
-            # root_file.Close()
+
+
+    def _create_fake_rdf(self):
+        """
+        Create a fake RDataFrame when the original tree/evt cannot be found.
+        This allows the package to run normally and return empty histograms.
+        """
+        # Create a fake RDataFrame with a dummy column to avoid errors when calling Histo1D/Histo2D
+        fake_rdf = R.RDataFrame(1)  # DataFrame with 1 entry
+        fake_rdf = fake_rdf.Define("rec_m2", "-1")  # Add a dummy column
+        # Filter out all entries to make it effectively empty
+        fake_rdf = fake_rdf.Filter("rec_m2 > 0")  # This will result in 0 entries
+        return R.RDF.AsRNode(fake_rdf)
 
     def save(self, tree_name: str, path: str, var: list[str]):
         """
@@ -469,15 +497,15 @@ class RDFFactory(Factory):
             #if not os.path.isfile(value):
             #    print("not a file", key)
             #    continue            
-            evt_chain = R.TChain(self.tree_name, "Read")
-            evt_chain.Add(value)
-            cut_chain = R.TChain(self.pre_cut_tree_name, "Read")
-            cut_chain.Add(value)          
-            if (evt_chain.GetEntries() <= 0) and (cut_chain.GetEntries() <= 0 ):
-                print("no cut and evt trees, skip", key)
-                continue
-            else:
-                self.staff_dict[key] = RDFStaff(path = value,
+            # evt_chain = R.TChain(self.tree_name, "Read")
+            # evt_chain.Add(value)
+            # cut_chain = R.TChain(self.pre_cut_tree_name, "Read")
+            # cut_chain.Add(value)
+            # if (evt_chain.GetEntries() <= 0) and (cut_chain.GetEntries() <= 0 ):
+            #     print("no cut and evt trees, skip", key)
+            #     continue
+            # else:
+            self.staff_dict[key] = RDFStaff(path = value,
                                             name = key,
                                             xsec = self.xsec_dict[key], 
                                             pre_cut_tree_name = self.pre_cut_tree_name,
