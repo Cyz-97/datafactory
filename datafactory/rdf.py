@@ -496,22 +496,25 @@ class RDFFactory(Factory):
         for key, value in self.path_dict.items():
             #if not os.path.isfile(value):
             #    print("not a file", key)
-            #    continue            
-            # evt_chain = R.TChain(self.tree_name, "Read")
-            # evt_chain.Add(value)
-            # cut_chain = R.TChain(self.pre_cut_tree_name, "Read")
-            # cut_chain.Add(value)
-            # if (evt_chain.GetEntries() <= 0) and (cut_chain.GetEntries() <= 0 ):
-            #     print("no cut and evt trees, skip", key)
-            #     continue
-            # else:
-            self.staff_dict[key] = RDFStaff(path = value,
-                                            name = key,
-                                            xsec = self.xsec_dict[key], 
-                                            pre_cut_tree_name = self.pre_cut_tree_name,
-                                            pre_cut_names = self.pre_cut_names,
-                                            range = self.range,
-                                            type = self.type_dict.get(key, StaffType.other))
+            #    continue
+            # 即使 RDFStaff.load 中做了相关的保护，这段保护代码仍然对那些连cut 
+            # chain 都没有的文件起作用。
+            # 未来需要有一个自检功能，提前检查所有文件的格式，显式给出warning
+            evt_chain = R.TChain(self.tree_name, "Read")
+            evt_chain.Add(value)
+            cut_chain = R.TChain(self.pre_cut_tree_name, "Read")
+            cut_chain.Add(value)
+            if (evt_chain.GetEntries() <= 0) and (cut_chain.GetEntries() <= 0 ):
+                print("no cut and evt trees, skip", key)
+                continue
+            else:
+                self.staff_dict[key] = RDFStaff(path = value,
+                                                name = key,
+                                                xsec = self.xsec_dict[key], 
+                                                pre_cut_tree_name = self.pre_cut_tree_name,
+                                                pre_cut_names = self.pre_cut_names,
+                                                range = self.range,
+                                                type = self.type_dict.get(key, StaffType.other))
             
         # Divide sample into components basing on a set of cuts
         #for key, value in self.classify_dict.items():

@@ -150,6 +150,9 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
                    out = np.zeros_like(baseline)
         )
     )
+    # ndf 非零 bin 的个数
+    ndf = np.sum((baseline * y_data_norm)**2>0)
+    chi2_ndf = chi2/ndf
     
     if (stack == False):
         ax1.stairs(baseline, np.hstack([x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2]),
@@ -183,8 +186,14 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
     # ax2.bar(x_data, diff, width = np.diff(x_edge_data)*0.8, alpha = 0.8, color = "blue", ls  = "")
 
     # 绘制差异误差棒图
-    ax2.bar(x_mc, baseline_err/baseline, width = x_width_data,
-            bottom = 1-baseline_err/2/baseline,
+    residual = np.divide(
+        baseline_err,
+        baseline,
+        where = baseline != 0, 
+        out = np.zeros_like(baseline)
+    )
+    ax2.bar(x_mc, residual, width = x_width_data,
+            bottom = 1-residual/2,
             hatch = "//////////", hatch_linewidth = 0.6, 
             fill = False, lw = 0, ls = "", 
             facecolor = "gray", alpha = 0.6)
@@ -203,7 +212,7 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
 
     # 在图中添加 chi2 信息
     if plot_chi2_pos is not None:
-        ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], fr"$\chi^2/N_{{\text{{bins}}}} = {chi2/len(x_mc):.3f}$",
+        ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], fr"$\chi^2/\text{{NDF}} = {chi2_ndf:.3f}$",
                 fontsize = "x-small", horizontalalignment='right', verticalalignment='top',
                 transform = ax2.transAxes)
 

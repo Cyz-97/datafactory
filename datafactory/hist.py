@@ -126,17 +126,28 @@ class HistStaff(Staff):
         elif self.path is not None:
             with R.TFile.Open(self.path, "read") as f:
                 temp_hist = f.Get(self.name)
-                temp_hist.SetDirectory(R.nullptr)
+                if temp_hist:
+                    temp_hist.SetDirectory(R.nullptr)
+                else:
+                    print(f"Warning: there is no {self.name} object in {self.path}")
+                    temp_hist = None
+                
+            self.histogram = temp_hist    
+            if self.histogram is not None:
+                self.dimension = self.histogram.GetDimension()
+                self.histogram.Sumw2()
+            else:
+                self.dimension = 0
 
-                self.histogram = temp_hist
         elif self.numpy_tuple is not None:
             self.histogram = Numpy2TH1(*self.numpy_tuple)
             self.dimension = 1
+            self.dimension = self.histogram.GetDimension()
+            self.histogram.Sumw2()
         else:
             raise Exception("HistStaff: path and histogram are both None.")
 
-        self.dimension = self.histogram.GetDimension()
-        self.histogram.Sumw2()
+
 
     def save(self, path: str):
         with R.TFile(path, "update") as f:
@@ -276,9 +287,13 @@ class HistFactory(Factory):
             self.staff_dict = {}
             for name, path in self.path_dict.items():
                 # print(name)
-                self.staff_dict[name] = HistStaff(name=name,
-                                                  path=path,
-                                                  type=self.type_dict.get(name, StaffType.other))
+                temp = HistStaff(name=name,
+                                 path=path,
+                                 type=self.type_dict.get(name, StaffType.other))
+                if temp.histogram is not None:
+                    self.staff_dict[name] = temp
+                else:
+                    pass
         else:
             raise Exception("HistFactory: path and histogram are both None.")
 
