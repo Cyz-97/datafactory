@@ -181,6 +181,15 @@ class RDFStaff(Staff):
     name: str
     # path of root file
     path: str          
+    # necessary columns for analysis
+    # - this is defined to tolerate the empty event trees.
+    # When a file has events originially but event selection wrapped all
+    # events, the file does not include an event tree.
+    # In this case, RDFStaff fake one RDF, with necessary columns but no entries.
+    # then the empty histograms can be created, making sure the process
+    # being passed through smoothly.
+    necessary_columns: List[str] = field(init=True, default_factory=list, repr=False) 
+
     # name of the tree in the root file
     tree_name: str = "evt"            
     # name of the tree recording the pre selection cut chain
@@ -269,9 +278,11 @@ class RDFStaff(Staff):
         """
         # Create a fake RDataFrame with a dummy column to avoid errors when calling Histo1D/Histo2D
         fake_rdf = R.RDataFrame(1)  # DataFrame with 1 entry
-        fake_rdf = fake_rdf.Define("rec_m2", "-1")  # Add a dummy column
+        fake_rdf = fake_rdf.Define("fake_var", "-1")  # Add a dummy column
+        for column in self.necessary_columns:
+            fake_rdf = fake_rdf.Define(column, "-1.e99")  # Add a dummy column
         # Filter out all entries to make it effectively empty
-        fake_rdf = fake_rdf.Filter("rec_m2 > 0")  # This will result in 0 entries
+        fake_rdf = fake_rdf.Filter("fake_var > 0")  # This will result in 0 entries
         return R.RDF.AsRNode(fake_rdf)
 
     def save(self, tree_name: str, path: str, var: list[str]):
@@ -467,6 +478,8 @@ class RDFFactory(Factory):
     classify_dict: Dict[str, str] = field(default_factory=dict)
     pre_cut_names: Optional[List[str]] = None
     range: Optional[Any] = None
+    necessary_columns: List[str] = field(init=True, default_factory=list, repr=False) 
+
     
     # Internal state
     staff_dict: Dict[str, Any] = field(init=False, default_factory=dict)
@@ -514,7 +527,8 @@ class RDFFactory(Factory):
                                                 pre_cut_tree_name = self.pre_cut_tree_name,
                                                 pre_cut_names = self.pre_cut_names,
                                                 range = self.range,
-                                                type = self.type_dict.get(key, StaffType.other))
+                                                type = self.type_dict.get(key, StaffType.other),
+                                                necessary_columns = self.necessary_columns)
             
         # Divide sample into components basing on a set of cuts
         #for key, value in self.classify_dict.items():
