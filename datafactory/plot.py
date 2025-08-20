@@ -164,10 +164,19 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
              transform = ax1.transAxes)
     
     # 设置 y 轴标签和范围
+    ymin, ymax = None, None
+    if "log" in yscale and ylim is None:
+        ymin = 0.8
+        ymax = np.max(y_data_norm)*200
+    elif ylim == None:
+        ymin = 0
+        ymax = np.max(y_data_norm)*2
+    else:
+        ymin, ymax = ylim
     ax1.set(ylabel = ylabel, 
-            ylim = (0 if yscale != "log" else None,
-                    np.max(y_data_norm)*1.8) if ylim == None else ylim,
+            ylim = (ymin, ymax),
             yscale = yscale)
+    
     # 添加图例
     legend = ax1.legend(title = legend_title,
                loc = "best", ncol=4, handlelength=1.5, fontsize = 5, columnspacing = 0.5)
