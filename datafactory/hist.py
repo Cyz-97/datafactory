@@ -2,7 +2,7 @@ from .core import Staff, StaffType, Factory
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Self
 from copy import copy, deepcopy
-
+from numbers import Number
 
 import ROOT as R
 
@@ -241,7 +241,7 @@ class HistStaff(Staff):
         self._get_value(other)
         
         res = copy(self)
-        if isinstance(other, float):
+        if isinstance(other, Number):
             # print(res.histogram.Integral())
             res.histogram.Scale(other)
             # print(res.histogram.Integral())
@@ -261,7 +261,7 @@ class HistStaff(Staff):
         if self.dimension != other.dimension:
             raise Exception("Invalid dimension for division.")
 
-        if isinstance(other, float):
+        if isinstance(other, Number):
             res = copy(self)
             res.histogram.Scale(1/other)
         elif isinstance(other, type(self)):
@@ -410,7 +410,7 @@ class HistFactory(Factory):
 
     def __mul__(self, other: Dict[str, Any] | float) -> Self:
         res = copy(self)
-        if isinstance(other, float):
+        if isinstance(other, Number):
             for name, staff in res.staff_dict.items():
                 res.staff_dict[name] *= other
         else:
