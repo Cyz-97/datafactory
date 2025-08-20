@@ -51,20 +51,27 @@ def fuck_roofit_param(fit_result):
     return result_dict
 
 def fit_mc_data(mc_hist, data_hist, artificial_model = False):
+
+    mc_hist._get_value()
+    data_hist._get_value(data_hist)
+
     x_min = data_hist.histogram.GetXaxis().GetXmin()
     x_max = data_hist.histogram.GetXaxis().GetXmax()
     x = R.RooRealVar("x", "s", x_min, x_max)
+    
     rdh_data = R.RooDataHist("data_rdh", "Data", R.RooArgList(x), data_hist.histogram)
-    rdh_mc = {key: R.RooDataHist(f"rdh_{key}", f"rdh_{key}", R.RooArgList(x), value.histogram) for key, value in mc_hist.staff_dict.items()}
+    rdh_mc = {}
+    for key, value in mc_hist.staff_dict.items():
+        rdh_mc[key] = R.RooDataHist(f"rdh_{key}", f"rdh_{key}", R.RooArgList(x), value.histogram)
     # 3. Convert to PDFs
     pdf_mc = {key: R.RooHistPdf(f"pdf_{key}", f"pdf_{key}", R.RooArgList(x), value) for key, value in rdh_mc.items()}
     # 5. Fit fractions (or yields)
     n_mc = {key: R.RooRealVar(f"n_{key}", f"n_{key}", mc_hist.staff_dict[key].histogram.Integral(), 0, mc_hist.staff_dict[key].histogram.Integral()*1e4) for key, value in pdf_mc.items()}
     if artificial_model:
         a0 = R.RooRealVar("mean", "mean", 1.6854, 1.5, 1.8)
-        a1 = R.RooRealVar("sigma", "sigma", 0.1, 0, 0.2)
+        a1 = R.RooRealVar("sigma", "sigma", 0.1, 1e-19, 0.2)
         poly_bkg = R.RooGaussian("pdf_artificial_bkg", "Polynomial background", x, a0, a1)
-        n_poly = R.RooRealVar("n_artificial_bkg", "PolyBkg yield", 0, 0, 1e6)
+        n_poly = R.RooRealVar(r"n_\text{Artificial background}", "PolyBkg yield", 0, 0, 1e6)
         parameterize_model = [poly_bkg]
         param_model_yield = [n_poly]
     else:
@@ -76,7 +83,7 @@ def fit_mc_data(mc_hist, data_hist, artificial_model = False):
                         R.RooArgList(list(pdf_mc.values()) + parameterize_model),
                         R.RooArgList(list(n_mc.values()) + param_model_yield)
                         )
-    fit_result = model.fitTo(rdh_data, R.RooFit.Save(), R.RooFit.PrintLevel(-1), R.RooFit.Verbose(False), R.RooFit.Verbose(False))
+    fit_result = model.fitTo(rdh_data, R.RooFit.Save(), R.RooFit.PrintLevel(-1), R.RooFit.Verbose(False))
     # frame = x.frame(R.RooFit.Title("Fit to data"))
     # rdh_data.plotOn(frame)
     # model.plotOn(frame)
@@ -90,4 +97,5 @@ def fit_mc_data(mc_hist, data_hist, artificial_model = False):
     # c1.BuildLegend()
     # # c1.SetLogy()
     # c1.Draw()
-    return fit_result, parameterize_model, fuck_roofit_param(fit_result)
+    fit_param = fuck_roofit_param(fit_result)
+    return fit_result, parameterize_model,fit_param 
