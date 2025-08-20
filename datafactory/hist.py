@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Self
 from copy import copy, deepcopy
 
+
 import ROOT as R
 
 
@@ -71,6 +72,53 @@ def Numpy2TH1(x_edge, content, err, name=""):
 
     return hist
 
+def Numpy2TH2(x_edge, y_edge, content, err, name=""):
+    """
+    [兼容模式] 从二维Numpy矩阵创建一个可变分箱的ROOT TH2D。
+    此版本使用经典的 SetBinContent 循环，以确保与不支持现代Numpy接口的旧版ROOT完全兼容。
+
+    Args:
+        x_edge (np.ndarray): X轴的bin边界数组。
+        y_edge (np.ndarray): Y轴的bin边界数组。
+        content (np.ndarray): 2D的bin内容矩阵，形状为 (n_ybins, n_xbins)。
+        err (np.ndarray): 2D的bin误差矩阵，形状为 (n_ybins, n_xbins)。
+        name (str, optional): 直方图的名称和标题。
+
+    Returns:
+        R.TH2D: 创建并填充好的ROOT二维直方图。
+    """
+    import array
+    # 确保ROOT不会将直方图与任何打开的文件关联
+    R.gROOT.cd()
+
+    x_nbins = len(x_edge) - 1
+    y_nbins = len(y_edge) - 1
+
+    # 校验输入的二维矩阵形状是否与bin的数量匹配
+    if content.shape != (y_nbins, x_nbins) or err.shape != (y_nbins, x_nbins):
+        raise ValueError(f"内容(content)或误差(err)矩阵的形状应为 ({y_nbins}, {x_nbins})，但当前为 {content.shape}")
+
+    # 使用 'array' 模块创建C-style数组，这是与旧版ROOT C++交互最可靠的方式
+    x_edge_arr = array.array('d', x_edge)
+    y_edge_arr = array.array('d', y_edge)
+
+    # 创建空的TH2D
+    hist = R.TH2D(name, name,
+                  x_nbins, x_edge_arr,
+                  y_nbins, y_edge_arr)
+    
+    # 显式激活误差存储。对于SetBinError是必需的。
+    hist.Sumw2()
+
+    # 使用嵌套循环填充，这是最兼容、最可靠的方法
+    for iy in range(y_nbins):
+        for ix in range(x_nbins):
+            # 直接使用2D索引访问矩阵
+            # 注意：ROOT的bin索引从1开始，而Numpy索引从0开始
+            hist.SetBinContent(ix + 1, iy + 1, content[iy, ix])
+            hist.SetBinError(ix + 1, iy + 1, err[iy, ix])
+
+    return hist
 
 def TH22Numpy(hist):
     """
@@ -94,13 +142,15 @@ def TH22Numpy(hist):
                  for i in range(1, hist.GetYaxis().GetNbins() + 1)])
     z = np.array([[hist.GetBinContent(hist.FindBin(xi, yi)) for xi in x]
                   for yi in y])
+    err = np.array([[hist.GetBinError(hist.FindBin(xi, yi)) for xi in x]
+                  for yi in y])
 
     x = np.append(x, hist.GetXaxis().GetBinLowEdge(hist.GetXaxis(
     ).GetNbins()) + hist.GetXaxis().GetBinWidth(hist.GetXaxis().GetNbins()))
     y = np.append(y, hist.GetYaxis().GetBinLowEdge(hist.GetYaxis(
     ).GetNbins()) + hist.GetYaxis().GetBinWidth(hist.GetYaxis().GetNbins()))
 
-    return x, y, z
+    return x, y, z, err
 
 
 @dataclass
@@ -109,7 +159,8 @@ class HistStaff(Staff):
     type: StaffType = StaffType.other
     path: str = field(default=None, repr=False)
     histogram: Any = field(default=None)
-
+    
+    # xedge, y, yerr
     numpy_tuple: Tuple[List, List, List] = field(default=None, repr=False)
 
     # 因为 weight 和 multiply 相互冲突
@@ -122,6 +173,7 @@ class HistStaff(Staff):
 
     def load(self):
         if self.histogram is not None:
+            self.dimension = self.histogram.GetDimension()
             pass
         elif self.path is not None:
             with R.TFile.Open(self.path, "read") as f:
@@ -142,7 +194,6 @@ class HistStaff(Staff):
         elif self.numpy_tuple is not None:
             self.histogram = Numpy2TH1(*self.numpy_tuple)
             self.dimension = 1
-            self.dimension = self.histogram.GetDimension()
             self.histogram.Sumw2()
         else:
             raise Exception("HistStaff: path and histogram are both None.")
@@ -256,7 +307,7 @@ class HistStaff(Staff):
         concatenate_yerr = np.concatenate([yerr1, yerr2])
         concatenate_edge = np.concatenate([xedge1,
                                            xedge2[1:] - xedge2[0] + xedge1[-1]])
-        res = HistStaff(name="concatenate",
+        res = HistStaff(name=self.name,
                         numpy_tuple=(concatenate_edge,
                                      concatenate_y,
                                      concatenate_yerr),
@@ -264,7 +315,11 @@ class HistStaff(Staff):
         return res
 
     def norm_to(self, count: float):
-        self.histogram.Scale(count / self.histogram.Integral())
+        if self.histogram.Integral() != 0:
+            weight = count / self.histogram.Integral()
+            self.histogram.Scale(weight)
+        else:
+            pass
         
     def get_norm_factor(self, count: float):
         return count / self.histogram.Integral()
@@ -380,3 +435,7 @@ class HistFactory(Factory):
                 res[name] = staff.get_norm_factor(count_dict[name])
 
         return res
+    
+    def append(self, histstaff: HistStaff):
+        self.staff_dict[histstaff.name] = copy(histstaff)
+        self.type_dict[histstaff.name] = histstaff.type
