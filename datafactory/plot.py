@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 import os 
 # plt.style.use('HadTauAlg-00-01/script/datafactory/style.mplstyle')
 
+from .core import StaffType
+
 def apply_style():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     style_path = os.path.join(script_dir, 'style.mplstyle')
@@ -117,24 +119,26 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
     # 初始化基线误差数组
     baseline_err = np.zeros_like(x_data)
     # 遍历蒙特卡洛数据字典
-    for i in x_mc_col.keys():
-        # 绘制柱状图
-        if (stack):
-            ax1.bar(x_edge_mc[:-1], y_mc_col[i], width = x_width_mc_col[i], bottom = baseline,
-                    label = "$"+i+"$", lw = 0, alpha = 0.8, color = "#"+get_color(i),
-                    edgecolor='white', align='edge',
-                    hatch = "/////\\\\\\\\\\" if i == highlight_channel else "")
-        else:
-            ax1.stairs(y_mc_col[i],np.hstack([ x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2 ]), 
-                    label = "$"+i+"$", lw = 0.6, alpha = 0.8, color = "#"+get_color(i))
-        # 累加基线
-        baseline += y_mc_col[i]
-        # 累加基线误差
-        baseline_err = np.hypot(baseline_err , yerr_mc_col[i])
+    for component_type in [StaffType.background, StaffType.signal, StaffType.other]:
+        for i in x_mc_col.keys():
+            # 绘制柱状图
+            if stack_mc.staff_dict[i].type == component_type:
+                if (stack):
+                    ax1.bar(x_edge_mc[:-1], y_mc_col[i], width = x_width_mc_col[i], bottom = baseline,
+                            label = "$"+i+"$", lw = 0, alpha = 0.8, color = "#"+get_color(i),
+                            edgecolor='white', align='edge',
+                            hatch = "/////\\\\\\\\\\" if i == highlight_channel else "")
+                else:
+                    ax1.stairs(y_mc_col[i],np.hstack([ x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2 ]), 
+                            label = "$"+i+"$", lw = 0.6, alpha = 0.8, color = "#"+get_color(i))
+                # 累加基线
+                baseline += y_mc_col[i]
+                # 累加基线误差
+                baseline_err = np.hypot(baseline_err , yerr_mc_col[i])
         
     # 求和后基线表示总 MC histogram
-    ax1.bar(x_mc, baseline_err, width = x_width_mc, 
-            bottom = baseline - baseline_err/2, 
+    ax1.bar(x_mc, 2*baseline_err, width = x_width_mc, 
+            bottom = baseline - baseline_err, 
             hatch = "//////////", hatch_linewidth = 0.6, 
             fill = False, lw = 0, ls = "", 
             facecolor = "gray", alpha = 0.6, label = r"$\text{MC error}$")
@@ -145,8 +149,8 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
     # 计算 MC data 的 chi2
     chi2 = np.sum(
         np.divide( (baseline - y_data_norm)**2, 
-                   (np.linalg.norm([baseline_err, yerr_data_norm]))**2,
-                   where = np.linalg.norm([baseline_err, yerr_data_norm]) != 0,
+                   (np.hypot(baseline_err, yerr_data_norm))**2,
+                   where = np.hypot(baseline_err, yerr_data_norm) != 0,
                    out = np.zeros_like(baseline)
         )
     )
@@ -201,8 +205,8 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
         where = baseline != 0, 
         out = np.zeros_like(baseline)
     )
-    ax2.bar(x_mc, residual, width = x_width_data,
-            bottom = 1-residual/2,
+    ax2.bar(x_mc, 2*residual, width = x_width_data,
+            bottom = 1-residual,
             hatch = "//////////", hatch_linewidth = 0.6, 
             fill = False, lw = 0, ls = "", 
             facecolor = "gray", alpha = 0.6)
