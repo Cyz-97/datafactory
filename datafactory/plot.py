@@ -130,7 +130,7 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
                             hatch = "/////\\\\\\\\\\" if i == highlight_channel else "")
                 else:
                     ax1.stairs(y_mc_col[i],np.hstack([ x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2 ]), 
-                            label = "$"+i+"$", lw = 0.6, alpha = 0.8, color = "#"+get_color(i))
+                            label = "$"+i+"$", lw = 0.6, alpha = 1, color = "#"+get_color(i))
                 # 累加基线
                 baseline += y_mc_col[i]
                 # 累加基线误差
