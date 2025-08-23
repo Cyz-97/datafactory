@@ -277,6 +277,14 @@ class HistStaff(Staff):
                          histogram=self.histogram.Clone(),
                          type = self.type)
     
+    def __deepcopy__(self, memo):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        self._get_value(self)
+        return HistStaff(name=self.name, 
+                         histogram=self.histogram.Clone(),
+                         type = self.type)
+    
     def get_eff(self, other: Self):
         self._get_value(self)
         self._get_value(other)
@@ -385,7 +393,14 @@ class HistFactory(Factory):
             staff._get_value(staff)
 
     def __copy__(self):
+        
         return HistFactory(staff_dict={key: copy(val) for key, val in self.staff_dict.items()},
+                           type_dict = deepcopy(self.type_dict))
+
+    def __deepcopy__(self, memo):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        return HistFactory(staff_dict={key: deepcopy(val) for key, val in self.staff_dict.items()},
                            type_dict = deepcopy(self.type_dict))
 
     def __sub__(self, other: Dict[str, Any] | float) -> Self:

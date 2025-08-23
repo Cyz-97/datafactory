@@ -3,6 +3,7 @@ from .hist import HistFactory, HistStaff
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from hepunits import MeV, GeV, invpb, invnb, invfb, nb, pb, fb
+from copy import copy, deepcopy
 
 import ROOT as R
 
@@ -68,11 +69,20 @@ class CutFlow:
         if self.latex == r"\mathrm{name}":
             self.latex = fr"\mathrm{{{self.name}}}"
 
-    def copy(self) -> 'CutFlow':
+    def __copy__(self,) -> 'CutFlow':
         """Create a deep copy of the CutFlow instance"""
         return CutFlow(
             name=self.name,
             list_bystander=self.list_bystander.copy(),
+            formular=self.formular,
+            latex=self.latex
+        )
+    
+    def __deepcopy__(self,) -> 'CutFlow':
+        """Create a deep copy of the CutFlow instance"""
+        return CutFlow(
+            name=self.name,
+            list_bystander=self.list_bystander.deepcopy(),
             formular=self.formular,
             latex=self.latex
         )
@@ -236,6 +246,13 @@ class RDFStaff(Staff):
         self.pre_selection()
         # self._column_names = self.rdf.GetColumnNames()
 
+    def __deepcopy__(self,):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        cls = HistFactory(
+            staff_dict=deepcopy(self.staff_dict),
+            type_dict=deepcopy(self.type_dict)
+        )
 
 
     def load(self):
@@ -472,7 +489,6 @@ class RDFFactory(Factory):
     # Configuration options with defaults
     type_dict: Dict[str, StaffType] = field(default_factory=dict)
     tree_name: str = "evt"
-    tree_name: str = "evt"
     pre_cut_tree_name: str = "cut"
     cuts: List[str] = field(default_factory=list)
     classify_dict: Dict[str, str] = field(default_factory=dict)
@@ -638,3 +654,12 @@ class RDFFactory(Factory):
         for key, val in self.staff_dict.items():
             print(f"Writing file: {path_dir[key]}")
             val.save(tree_name, path_dir[key], var)
+
+    def __deepcopy__(self, memo):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        return HistFactory(
+            staff_dict=deepcopy(self.staff_dict),
+            type_dict=deepcopy(self.type_dict),
+
+        )
