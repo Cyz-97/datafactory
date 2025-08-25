@@ -384,7 +384,16 @@ class HistFactory(Factory):
     def concatenate(self, other: Self) -> Self:
         res = deepcopy(self)
         for name, staff in self.staff_dict.items():
-            res.staff_dict[name] = staff.concatenate(other.staff_dict[name])
+            if name in other.staff_dict.keys():
+                res.staff_dict[name] = staff.concatenate(other.staff_dict[name])
+            else:
+                print(f"Warning: no histogram for {name}, concatenate a zero histogram.")
+                fake_hist = list(other.staff_dict.values())[0].histogram.Clone()
+                fake_hist.Reset()
+                
+                res.staff_dict[name] = staff.concatenate(
+                    HistStaff(name = name, histogram = fake_hist, type=self.type_dict[name])
+                )
 
         return res
 

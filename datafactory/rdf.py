@@ -1,11 +1,13 @@
 from .core import Staff, StaffType, Factory
 from .hist import HistFactory, HistStaff
 from dataclasses import dataclass, field
+import dataclasses as dc
 from typing import Optional, List, Dict, Any, Tuple
 from hepunits import MeV, GeV, invpb, invnb, invfb, nb, pb, fb
 from copy import copy, deepcopy
 
 import ROOT as R
+
 
 
 def ensure_parent_directory(path):
@@ -26,6 +28,12 @@ def ensure_parent_directory(path):
     else:
         pass
         # print(f"Directory '{parent_dir}' already exists.")
+
+def _copy_init_fields(src, dst, memo):
+    # Copy only dataclass fields with init=True
+    for f in dc.fields(src.__class__):
+        if f.init:
+            setattr(dst, f.name, deepcopy(getattr(src, f.name), memo))
 
 @dataclass
 class CutFlow:
@@ -78,15 +86,15 @@ class CutFlow:
             latex=self.latex
         )
     
-    def __deepcopy__(self,) -> 'CutFlow':
-        """Create a deep copy of the CutFlow instance"""
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
         return CutFlow(
             name=self.name,
-            list_bystander=self.list_bystander.deepcopy(),
+            list_bystander=deepcopy(self.list_bystander, memo),
             formular=self.formular,
             latex=self.latex
         )
-
+    
     def apply_on_rdf(self, sample: Any) -> None:
         """
         Initialize sample processing with RDataFrame.
@@ -246,13 +254,54 @@ class RDFStaff(Staff):
         self.pre_selection()
         # self._column_names = self.rdf.GetColumnNames()
 
-    def __deepcopy__(self,):
-        new = type(self).__new__(type(self))
+
+
+
+    def __deepcopy__(self, memo):
+        cls = self.__class__
+        new = cls.__new__(cls)         # don't run __init__/__post_init__
         memo[id(self)] = new
-        cls = HistFactory(
-            staff_dict=deepcopy(self.staff_dict),
-            type_dict=deepcopy(self.type_dict)
-        )
+
+        # 1) copy only init=True fields (plain data)
+        _copy_init_fields(self, new, memo)
+
+        # 2) simple non-init data you want to keep
+        new.weight = copy(self.weight)
+
+        # 3) share (or shallow-clone) caches; sharing is typical
+        new.__REUSE_DF__ = self.__REUSE_DF__
+
+        # 4) rewrap ROOT nodes to the same underlying graphs (no reload)
+        new.rdf = R.RDF.AsRNode(self.rdf) if getattr(self, "rdf", None) is not None else None
+        new.pre_cut_tree = (R.RDF.AsRNode(self.pre_cut_tree)
+                            if getattr(self, "pre_cut_tree", None) is not None else None)
+
+        # 5) rebuild pre_cut_chain from the copied pre_cut_tree (fresh RResultPtr)
+        new.pre_cut_chain = {}
+        # ensure we have names
+        if new.pre_cut_tree is not None:
+            if new.pre_cut_names is None:
+                # copy the discovered columns from the source tree to keep behavior stable
+                src_names = list(self.pre_cut_chain.keys()) or [str(c) for c in self.pre_cut_tree.GetColumnNames()]
+                new.pre_cut_names = src_names
+            for idx, name in enumerate(new.pre_cut_names):
+                if idx > 14:
+                    break
+                new.pre_cut_chain[name] = new.pre_cut_tree.Sum(f"{name}")
+
+        # 6) rebuild CutFlow results against the copied rdf
+        #    (copy only declarative parts; then apply_on_rdf to create fresh ROOT handles)
+        new.cuts = []
+        if new.rdf is not None and getattr(self, "cuts", None):
+            for cf in self.cuts:
+                cf_copy = deepcopy(cf, memo)   # uses the CutFlow deepcopy above
+                cf_copy.apply_on_rdf(new.rdf if len(new.cuts) == 0 else new.cuts[-1].sample_final)
+                new.cuts.append(cf_copy)
+
+        # 7) optional cosmetic cache
+        new._column_names = list(getattr(self, "_column_names", []))
+
+        return new
 
 
     def load(self):
@@ -395,13 +444,30 @@ class RDFStaff(Staff):
         """
         import copy
         if self.rdf != None:
-            self.cuts = copy.deepcopy(cuts)
+            self.cuts = copy.copy(cuts)
             iter_rdf = R.RDF.AsRNode(self.rdf)
             for cut in self.cuts:
                 cut.apply_on_rdf(iter_rdf)
                 iter_rdf = R.RDF.AsRNode(cut.sample_final)
         else:
             print("set_cuts(): There is no RDF.")
+
+    def append_cuts(self, cuts: List[CutFlow]):
+        """
+        Append a cut flow or a list of cut flows.
+
+        Parameters
+        ----------
+        cuts : list of functions
+            List of functions to apply as filters to the RDataFrame.
+        """
+        import copy
+        if isinstance(cuts, list):
+            new_cuts = self.cuts + copy.copy(cuts)
+        else:
+            new_cuts = self.cuts + [copy.copy(cuts)]
+        
+        self.set_cuts(new_cuts)
         
     def get_hist(self, func):
         """
@@ -534,7 +600,6 @@ class RDFFactory(Factory):
             cut_chain = R.TChain(self.pre_cut_tree_name, "Read")
             cut_chain.Add(value)
             if (evt_chain.GetEntries() <= 0) and (cut_chain.GetEntries() <= 0 ):
-                print("no cut and evt trees, skip", key)
                 continue
             else:
                 self.staff_dict[key] = RDFStaff(path = value,
@@ -572,6 +637,19 @@ class RDFFactory(Factory):
         self.cuts = cuts
         for key, value in self.staff_dict.items():
             value.set_cuts( self.classify_dict.get(key, []) + cuts)
+
+
+    def append_cuts(self, cuts: CutFlow | List[CutFlow]):
+        """
+        Append a cut (or a list of cuts) following the initial cut-list.
+        """
+        if isinstance(cuts, list):
+            self.cuts += cuts
+        else:
+            self.cuts += [cuts]
+
+        for key, value in self.staff_dict.items():
+            value.append_cuts(cuts)
 
     def get_hist(self, func, log=True):
         """
@@ -656,10 +734,32 @@ class RDFFactory(Factory):
             val.save(tree_name, path_dir[key], var)
 
     def __deepcopy__(self, memo):
-        new = type(self).__new__(type(self))
+        cls = self.__class__
+        new = cls.__new__(cls)
         memo[id(self)] = new
-        return HistFactory(
-            staff_dict=deepcopy(self.staff_dict),
-            type_dict=deepcopy(self.type_dict),
 
-        )
+        # init fields
+        new.path_dict = deepcopy(self.path_dict, memo)
+        new.xsec_dict = deepcopy(self.xsec_dict, memo)
+        new.luminosity = self.luminosity
+
+        new.type_dict = deepcopy(self.type_dict, memo)
+        new.tree_name = self.tree_name
+        new.pre_cut_tree_name = self.pre_cut_tree_name
+        new.classify_dict = deepcopy(self.classify_dict, memo)
+        new.pre_cut_names = deepcopy(self.pre_cut_names, memo)
+        new.range = deepcopy(self.range, memo)
+        new.necessary_columns = deepcopy(self.necessary_columns, memo)
+
+        # staff_dict is rebuilt from existing objects via RDFStaff.__deepcopy__
+        new.staff_dict = {k: deepcopy(v, memo) for k, v in self.staff_dict.items()}
+
+        # reapply current cuts declaratively (this rebuilds ROOT results on copied RDFs)
+        new.cuts = deepcopy(self.cuts, memo)
+        for k, staff in new.staff_dict.items():
+            head = self.classify_dict.get(k, [])
+            if isinstance(head, CutFlow):  # normalize
+                head = [head]
+            staff.set_cuts(head + new.cuts)
+
+        return new
