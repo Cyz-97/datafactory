@@ -2,6 +2,7 @@ from .core import Staff, StaffType, Factory
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Self
 from copy import copy, deepcopy
+from numbers import Number
 
 import ROOT as R
 
@@ -71,6 +72,53 @@ def Numpy2TH1(x_edge, content, err, name=""):
 
     return hist
 
+def Numpy2TH2(x_edge, y_edge, content, err, name=""):
+    """
+    [兼容模式] 从二维Numpy矩阵创建一个可变分箱的ROOT TH2D。
+    此版本使用经典的 SetBinContent 循环，以确保与不支持现代Numpy接口的旧版ROOT完全兼容。
+
+    Args:
+        x_edge (np.ndarray): X轴的bin边界数组。
+        y_edge (np.ndarray): Y轴的bin边界数组。
+        content (np.ndarray): 2D的bin内容矩阵，形状为 (n_ybins, n_xbins)。
+        err (np.ndarray): 2D的bin误差矩阵，形状为 (n_ybins, n_xbins)。
+        name (str, optional): 直方图的名称和标题。
+
+    Returns:
+        R.TH2D: 创建并填充好的ROOT二维直方图。
+    """
+    import array
+    # 确保ROOT不会将直方图与任何打开的文件关联
+    R.gROOT.cd()
+
+    x_nbins = len(x_edge) - 1
+    y_nbins = len(y_edge) - 1
+
+    # 校验输入的二维矩阵形状是否与bin的数量匹配
+    if content.shape != (y_nbins, x_nbins) or err.shape != (y_nbins, x_nbins):
+        raise ValueError(f"内容(content)或误差(err)矩阵的形状应为 ({y_nbins}, {x_nbins})，但当前为 {content.shape}")
+
+    # 使用 'array' 模块创建C-style数组，这是与旧版ROOT C++交互最可靠的方式
+    x_edge_arr = array.array('d', x_edge)
+    y_edge_arr = array.array('d', y_edge)
+
+    # 创建空的TH2D
+    hist = R.TH2D(name, name,
+                  x_nbins, x_edge_arr,
+                  y_nbins, y_edge_arr)
+    
+    # 显式激活误差存储。对于SetBinError是必需的。
+    hist.Sumw2()
+
+    # 使用嵌套循环填充，这是最兼容、最可靠的方法
+    for iy in range(y_nbins):
+        for ix in range(x_nbins):
+            # 直接使用2D索引访问矩阵
+            # 注意：ROOT的bin索引从1开始，而Numpy索引从0开始
+            hist.SetBinContent(ix + 1, iy + 1, content[iy, ix])
+            hist.SetBinError(ix + 1, iy + 1, err[iy, ix])
+
+    return hist
 
 def TH22Numpy(hist):
     """
@@ -94,13 +142,15 @@ def TH22Numpy(hist):
                  for i in range(1, hist.GetYaxis().GetNbins() + 1)])
     z = np.array([[hist.GetBinContent(hist.FindBin(xi, yi)) for xi in x]
                   for yi in y])
+    err = np.array([[hist.GetBinError(hist.FindBin(xi, yi)) for xi in x]
+                  for yi in y])
 
     x = np.append(x, hist.GetXaxis().GetBinLowEdge(hist.GetXaxis(
     ).GetNbins()) + hist.GetXaxis().GetBinWidth(hist.GetXaxis().GetNbins()))
     y = np.append(y, hist.GetYaxis().GetBinLowEdge(hist.GetYaxis(
     ).GetNbins()) + hist.GetYaxis().GetBinWidth(hist.GetYaxis().GetNbins()))
 
-    return x, y, z
+    return x, y, z, err
 
 
 @dataclass
@@ -109,7 +159,8 @@ class HistStaff(Staff):
     type: StaffType = StaffType.other
     path: str = field(default=None, repr=False)
     histogram: Any = field(default=None)
-
+    
+    # xedge, y, yerr
     numpy_tuple: Tuple[List, List, List] = field(default=None, repr=False)
 
     # 因为 weight 和 multiply 相互冲突
@@ -122,21 +173,32 @@ class HistStaff(Staff):
 
     def load(self):
         if self.histogram is not None:
+            self.dimension = self.histogram.GetDimension()
             pass
         elif self.path is not None:
             with R.TFile.Open(self.path, "read") as f:
                 temp_hist = f.Get(self.name)
-                temp_hist.SetDirectory(R.nullptr)
+                if temp_hist:
+                    temp_hist.SetDirectory(R.nullptr)
+                else:
+                    print(f"Warning: there is no {self.name} object in {self.path}")
+                    temp_hist = None
+                
+            self.histogram = temp_hist    
+            if self.histogram is not None:
+                self.dimension = self.histogram.GetDimension()
+                self.histogram.Sumw2()
+            else:
+                self.dimension = 0
 
-                self.histogram = temp_hist
         elif self.numpy_tuple is not None:
             self.histogram = Numpy2TH1(*self.numpy_tuple)
             self.dimension = 1
+            self.histogram.Sumw2()
         else:
             raise Exception("HistStaff: path and histogram are both None.")
 
-        self.dimension = self.histogram.GetDimension()
-        self.histogram.Sumw2()
+
 
     def save(self, path: str):
         with R.TFile(path, "update") as f:
@@ -158,7 +220,7 @@ class HistStaff(Staff):
         self._get_value(self)
         self._get_value(other)
 
-        res = HistStaff(name="sum", histogram=self.histogram.Clone())
+        res = copy(self)
         res.histogram.Add(other.histogram)
         return res
 
@@ -167,9 +229,9 @@ class HistStaff(Staff):
             raise Exception("Invalid dimension for division.")
 
         self._get_value(self)
-        self._get_value(other.histogram)
+        other._get_value(other)
 
-        res = HistStaff(name="sum", histogram=self.histogram.Clone())
+        res = copy(self)
         res.histogram.Add(other.histogram, -1)
         return res
 
@@ -179,10 +241,10 @@ class HistStaff(Staff):
         self._get_value(other)
         
         res = copy(self)
-        if isinstance(other, float):
-            print(res.histogram.Integral())
+        if isinstance(other, Number):
+            # print(res.histogram.Integral())
             res.histogram.Scale(other)
-            print(res.histogram.Integral())
+            # print(res.histogram.Integral())
         elif isinstance(other, HistStaff):
             if self.dimension != other.dimension:
                 raise Exception("Invalid dimension for division.")
@@ -199,25 +261,34 @@ class HistStaff(Staff):
         if self.dimension != other.dimension:
             raise Exception("Invalid dimension for division.")
 
-        if isinstance(other, float):
-            res = HistStaff(name="quotient", histogram=self.histogram.Clone())
+        if isinstance(other, Number):
+            res = copy(self)
             res.histogram.Scale(1/other)
         elif isinstance(other, type(self)):
-                res = HistStaff(name="sum", histogram=self.histogram.Clone())
-                res.histogram.Divide(other.histogram)
+            res = copy(self)
+            res.histogram.Divide(other.histogram)
         else:
             raise Exception(f"Invalid type for other: {type(other)}")
         return res
     
     def __copy__(self):
         self._get_value(self)
-        return HistStaff(name=self.name, histogram=self.histogram.Clone())
+        return HistStaff(name=self.name, 
+                         histogram=self.histogram.Clone(),
+                         type = self.type)
+    
+    def __deepcopy__(self, memo):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        self._get_value(self)
+        return HistStaff(name=self.name, 
+                         histogram=self.histogram.Clone(),
+                         type = self.type)
     
     def get_eff(self, other: Self):
         self._get_value(self)
         self._get_value(other)
 
-        print(other.histogram)
         eff_hist = R.TGraphAsymmErrors(self.histogram)
         eff_hist.Divide(self.histogram, other.histogram,
                         "cl=0.683 b(1,1) mode")
@@ -244,34 +315,48 @@ class HistStaff(Staff):
         concatenate_yerr = np.concatenate([yerr1, yerr2])
         concatenate_edge = np.concatenate([xedge1,
                                            xedge2[1:] - xedge2[0] + xedge1[-1]])
-        res = HistStaff(name="concatenate",
+        res = HistStaff(name=self.name,
                         numpy_tuple=(concatenate_edge,
                                      concatenate_y,
                                      concatenate_yerr),
                         type=self.type)
         return res
 
+    def norm_to(self, count: float):
+        if self.histogram.Integral() != 0:
+            weight = count / self.histogram.Integral()
+            self.histogram.Scale(weight)
+        else:
+            pass
+        
+    def get_norm_factor(self, count: float):
+        return count / self.histogram.Integral()
+
 
 @dataclass
-class HistFactory(Staff):
-    staff_dict: Dict[str, HistStaff] = field(default=None, repr=False)
+class HistFactory(Factory):
+    staff_dict: Dict[str, HistStaff] = field(default=None, repr=True)
     path_dict: Dict[str, str] = field(default=None, repr=False)
-    type_dict: Dict[str, StaffType] = field(default_factory=dict({}))
+    type_dict: Dict[str, StaffType] = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
         self.load()
 
     def load(self):
         if self.staff_dict is not None:
-            print(self.staff_dict)
+            # print(self.staff_dict)
             pass
         elif self.path_dict is not None:
             self.staff_dict = {}
             for name, path in self.path_dict.items():
-                print(name)
-                self.staff_dict[name] = HistStaff(name=name,
-                                                  path=path,
-                                                  type=self.type_dict.get(name, StaffType.other))
+                # print(name)
+                temp = HistStaff(name=name,
+                                 path=path,
+                                 type=self.type_dict.get(name, StaffType.other))
+                if temp.histogram is not None:
+                    self.staff_dict[name] = temp
+                else:
+                    pass
         else:
             raise Exception("HistFactory: path and histogram are both None.")
 
@@ -283,24 +368,32 @@ class HistFactory(Staff):
     def get_numpy(self):
         return {key: val.get_numpy() for key, val in self.staff_dict.items()}
 
-    def sum(self, type_list: List[StaffType] = [StaffType.signal, StaffType.background, StaffType.data]) -> HistStaff:
+    def sum(self, type_list: List[StaffType] = [StaffType.signal, StaffType.background]) -> HistStaff:
+        self._get_value()
         res = None
+
         for name, staff in self.staff_dict.items():
             if staff.type not in type_list:
-                print(name, staff.type, type_list)
                 continue
             if res is None:
-                print(name, staff.type, type_list)
                 res = deepcopy(staff)
             else:
-                print(name, staff.type, type_list)
                 res += staff
         return res
 
     def concatenate(self, other: Self) -> Self:
         res = deepcopy(self)
         for name, staff in self.staff_dict.items():
-            res.staff_dict[name] = staff.concatenate(other.staff_dict[name])
+            if name in other.staff_dict.keys():
+                res.staff_dict[name] = staff.concatenate(other.staff_dict[name])
+            else:
+                print(f"Warning: no histogram for {name}, concatenate a zero histogram.")
+                fake_hist = list(other.staff_dict.values())[0].histogram.Clone()
+                fake_hist.Reset()
+                
+                res.staff_dict[name] = staff.concatenate(
+                    HistStaff(name = name, histogram = fake_hist, type=self.type_dict[name])
+                )
 
         return res
 
@@ -309,12 +402,39 @@ class HistFactory(Staff):
             staff._get_value(staff)
 
     def __copy__(self):
+        
         return HistFactory(staff_dict={key: copy(val) for key, val in self.staff_dict.items()},
                            type_dict = deepcopy(self.type_dict))
 
+    def __deepcopy__(self, memo):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        return HistFactory(staff_dict={key: deepcopy(val) for key, val in self.staff_dict.items()},
+                           type_dict = deepcopy(self.type_dict))
+
+    def __sub__(self, other: Dict[str, Any] | float) -> Self:
+        res = copy(self)
+        
+        for name, staff in res.staff_dict.items():
+            res.staff_dict[name] -= other.staff_dict[name]
+        return res
+
+    def __truediv__(self, other: Dict[str, Any] | float) -> Self:
+        res = copy(self)
+        if isinstance(other, Staff):
+            for name, staff in res.staff_dict.items():
+                res.staff_dict[name] /= other
+        elif isinstance(other, Factory):
+            for name, staff in res.staff_dict.items():
+                res.staff_dict[name] /= other.staff_dict[name]
+        else:
+            raise ValueError("__truediv__: Undefined division")
+
+        return res
+
     def __mul__(self, other: Dict[str, Any] | float) -> Self:
         res = copy(self)
-        if isinstance(other, float):
+        if isinstance(other, Number):
             for name, staff in res.staff_dict.items():
                 res.staff_dict[name] *= other
         else:
@@ -326,3 +446,20 @@ class HistFactory(Staff):
                 res.staff_dict[name] *= other[name]
 
         return res
+
+    def norm_to(self, count_dict: int | float):
+        for name, staff in self.staff_dict.items():
+            if name in count_dict.keys():
+                staff.norm_to(count_dict[name])
+
+    def get_norm_factor(self, count_dict: int | float):
+        res = {}
+        for name, staff in self.staff_dict.items():
+            if name in count_dict.keys():
+                res[name] = staff.get_norm_factor(count_dict[name])
+
+        return res
+    
+    def append(self, histstaff: HistStaff):
+        self.staff_dict[histstaff.name] = copy(histstaff)
+        self.type_dict[histstaff.name] = histstaff.type

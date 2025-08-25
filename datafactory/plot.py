@@ -8,13 +8,15 @@ import matplotlib.pyplot as plt
 import os 
 # plt.style.use('HadTauAlg-00-01/script/datafactory/style.mplstyle')
 
+from .core import StaffType
+
 def apply_style():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     style_path = os.path.join(script_dir, 'style.mplstyle')
     plt.style.use(style_path)
 
 
-def compare_mc_data(stack_mc, data, **kargs):
+def compare_mc_data(stack_mc, data, xlabel, **kargs):
     """
     绘制蒙特卡洛数据与实际数据的对比图。
 
@@ -50,8 +52,6 @@ def compare_mc_data(stack_mc, data, **kargs):
     ylim = kargs.get("ylim", None)
     # 获取 y 轴标度，如果未提供则默认为 linear
     yscale = kargs.get("yscale", "linear")
-    # 获取 x 轴标签，如果未提供则默认为 r"$s ~\mathrm{[GeV^{2}]}$"
-    xlabel = kargs.get("xlabel", r"$s ~\mathrm{[GeV^{2}]}$")
     # 获取 y 轴标签，如果未提供则默认为 r"$\mathrm{Count}$"
     ylabel = kargs.get("ylabel", r"$\mathrm{Count}$")
     # 获取 y 轴标签，如果未提供则默认为 r"$\mathrm{Count}$"
@@ -67,7 +67,7 @@ def compare_mc_data(stack_mc, data, **kargs):
     # 设置图片大小
     figsize = kargs.get("figsize", (4,4))
     # 是否在 pull plot 里放 chi2
-    plot_chi2 = kargs.get("plot_chi2", None)
+    plot_chi2_pos = kargs.get("plot_chi2_pos", None)
         
     # 将 TH1F 对象转换为 numpy 数组
     x_data, y_data, yerr_data, x_edge_data = data.get_numpy()
@@ -119,39 +119,44 @@ def compare_mc_data(stack_mc, data, **kargs):
     # 初始化基线误差数组
     baseline_err = np.zeros_like(x_data)
     # 遍历蒙特卡洛数据字典
-    for i in x_mc_col.keys():
-        # 绘制柱状图
-        if (stack):
-            ax1.bar(x_edge_mc[:-1], y_mc_col[i], width = x_width_mc_col[i], bottom = baseline,
-                    label = "$"+i+"$", lw = 0, alpha = 0.8, color = "#"+get_color(i),
-                    edgecolor='white', align='edge',
-                    hatch = "/////\\\\\\\\\\" if i == highlight_channel else "")
-        else:
-            ax1.stairs(y_mc_col[i],np.hstack([ x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2 ]), 
-                    label = "$"+i+"$", lw = 0.6, alpha = 0.8, color = "#"+get_color(i))
-        # 累加基线
-        baseline += y_mc_col[i]
-        # 累加基线误差
-        baseline_err = np.hypot(baseline_err , yerr_mc_col[i])
+    for component_type in [StaffType.background, StaffType.signal, StaffType.other]:
+        for i in x_mc_col.keys():
+            # 绘制柱状图
+            if stack_mc.staff_dict[i].type == component_type:
+                if (stack):
+                    ax1.bar(x_edge_mc[:-1], y_mc_col[i], width = x_width_mc_col[i], bottom = baseline,
+                            label = "$"+i+"$", lw = 0, alpha = 0.8, color = "#"+get_color(i),
+                            edgecolor='white', align='edge',
+                            hatch = "/////\\\\\\\\\\" if i == highlight_channel else "")
+                else:
+                    ax1.stairs(y_mc_col[i],np.hstack([ x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2 ]), 
+                            label = "$"+i+"$", lw = 0.6, alpha = 1, color = "#"+get_color(i))
+                # 累加基线
+                baseline += y_mc_col[i]
+                # 累加基线误差
+                baseline_err = np.hypot(baseline_err , yerr_mc_col[i])
         
     # 求和后基线表示总 MC histogram
-    ax1.bar(x_mc, baseline_err, width = x_width_mc, 
-            bottom = baseline - baseline_err/2, 
+    ax1.bar(x_mc, 2*baseline_err, width = x_width_mc, 
+            bottom = baseline - baseline_err, 
             hatch = "//////////", hatch_linewidth = 0.6, 
             fill = False, lw = 0, ls = "", 
-            facecolor = "gray", alpha = 0.6, label = "MC error")
+            facecolor = "gray", alpha = 0.6, label = r"$\text{MC error}$")
     # 绘制实际数据的误差棒图
     ax1.errorbar(x_data, y_data_norm, xerr = 0, yerr = yerr_data_norm,
-            marker = "o", ms = 1.5, color = "black", label = "Data", ls = "", lw = 0.4)
+            marker = "o", ms = 1.5, color = "black", label = r"$\text{Data}$", ls = "", lw = 0.4)
     
     # 计算 MC data 的 chi2
     chi2 = np.sum(
         np.divide( (baseline - y_data_norm)**2, 
-                   (np.linalg.norm([baseline_err, yerr_data_norm]))**2,
-                   where = np.linalg.norm([baseline_err, yerr_data_norm]) != 0,
+                   (np.hypot(baseline_err, yerr_data_norm))**2,
+                   where = np.hypot(baseline_err, yerr_data_norm) != 0,
                    out = np.zeros_like(baseline)
         )
     )
+    # ndf 非零 bin 的个数
+    ndf = np.sum((baseline * y_data_norm)**2>0)
+    chi2_ndf = chi2/ndf
     
     if (stack == False):
         ax1.stairs(baseline, np.hstack([x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2]),
@@ -163,10 +168,19 @@ def compare_mc_data(stack_mc, data, **kargs):
              transform = ax1.transAxes)
     
     # 设置 y 轴标签和范围
+    ymin, ymax = None, None
+    if "log" in yscale and ylim is None:
+        ymin = 0.8
+        ymax = np.max(y_data_norm)*200
+    elif ylim == None:
+        ymin = 0
+        ymax = np.max(y_data_norm)*2
+    else:
+        ymin, ymax = ylim
     ax1.set(ylabel = ylabel, 
-            ylim = (0 if yscale != "log" else None,
-                    np.max(y_data_norm)*1.8) if ylim == None else ylim,
+            ylim = (ymin, ymax),
             yscale = yscale)
+    
     # 添加图例
     legend = ax1.legend(title = legend_title,
                loc = "best", ncol=4, handlelength=1.5, fontsize = 5, columnspacing = 0.5)
@@ -185,8 +199,14 @@ def compare_mc_data(stack_mc, data, **kargs):
     # ax2.bar(x_data, diff, width = np.diff(x_edge_data)*0.8, alpha = 0.8, color = "blue", ls  = "")
 
     # 绘制差异误差棒图
-    ax2.bar(x_mc, baseline_err/baseline, width = x_width_data,
-            bottom = 1-baseline_err/2/baseline,
+    residual = np.divide(
+        baseline_err,
+        baseline,
+        where = baseline != 0, 
+        out = np.zeros_like(baseline)
+    )
+    ax2.bar(x_mc, 2*residual, width = x_width_data,
+            bottom = 1-residual,
             hatch = "//////////", hatch_linewidth = 0.6, 
             fill = False, lw = 0, ls = "", 
             facecolor = "gray", alpha = 0.6)
@@ -204,13 +224,13 @@ def compare_mc_data(stack_mc, data, **kargs):
                marker = "o", ms = 1.5, color = "black", ls = "", lw = 0.4)
 
     # 在图中添加 chi2 信息
-    if plot_chi2 is not None:
-        ax2.text(plot_chi2[0], plot_chi2[1], fr"$\chi^2/N_{{\text{{bins}}}} = {chi2/len(x_mc):.3f}$",
+    if plot_chi2_pos is not None:
+        ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], fr"$\chi^2/\text{{NDF}} = {chi2_ndf:.3f}$",
                 fontsize = "x-small", horizontalalignment='right', verticalalignment='top',
-                transform = fig.transFigure)
+                transform = ax2.transAxes)
 
     # 设置 x 轴和 y 轴标签以及范围
-    ax2.set(xlabel = xlabel, ylabel = r"Data/MC",
+    ax2.set(xlabel = xlabel, ylabel = r"$\text{Data/MC}$",
             xlim = xlim, ylim = (0.5, 1.5))
     
     # 添加箭头指示超出 ylim 范围的点
@@ -252,3 +272,157 @@ def compare_mc_data(stack_mc, data, **kargs):
 
     # 显示图片
     return ax1, ax2
+
+
+#========================= 
+#          2D Plot       #
+#=========================
+def project_2d_histogram(hist, slice_axis, slice_num):
+    """
+    将二维直方图沿一个轴均匀切片，并将结果投影到另一个轴上。
+
+    参数:
+    ----------
+    hist : tuple
+        一个包含 (x_edges, y_edges, counts) 的元组。
+        - x_edges (array-like): x轴的箱体边界。
+        - y_edges (array-like): y轴的箱体边界。
+        - counts (2D array-like): 直方图的计数值，形状应为 (len(y_edges)-1, len(x_edges)-1)。
+          注意：如果使用 np.histogram2d，其输出的 counts 数组需要转置。
+    slice_axis : {'x', 'y'}
+        定义切片的坐标轴。
+    slice_num : int
+        要将 slice_axis 分成的切片数量。
+
+    返回:
+    -------
+    dict
+        一个字典，其中键是切片范围的字符串表示，值是表示一维直方图的元组 (bin_edges, counts)。
+    """
+    x_edges, y_edges, counts = hist
+    counts = np.asarray(counts)
+
+    # 验证 counts 数组的形状
+    expected_shape = (len(y_edges) - 1, len(x_edges) - 1)
+    if counts.shape != expected_shape:
+        raise ValueError(
+            f"counts 的形状 {counts.shape} 与箱体边界不匹配 "
+            f"（期望形状: {expected_shape}）。"
+            "如果 counts 来自 np.histogram2d，请先将其转置。"
+        )
+
+    projected_hists = {}
+
+    if slice_axis == 'y':
+        slicing_edges = y_edges
+        projection_edges = x_edges
+        sum_axis = 0  # 沿y轴对箱体求和
+    elif slice_axis == 'x':
+        slicing_edges = x_edges
+        projection_edges = y_edges
+        sum_axis = 1  # 沿x轴对箱体求和
+    else:
+        raise ValueError("slice_axis 必须是 'x' 或 'y'")
+
+    # 根据 slice_num 自动生成切片范围
+    slice_min, slice_max = slicing_edges[0], slicing_edges[-1]
+    slice_boundaries = np.linspace(slice_min, slice_max, slice_num + 1)
+    slice_ranges = list(zip(slice_boundaries[:-1], slice_boundaries[1:]))
+
+    for v_min, v_max in slice_ranges:
+        # 查找与切片范围对应的箱体索引
+        start_idx = np.searchsorted(slicing_edges, v_min, side='left')
+        end_idx = np.searchsorted(slicing_edges, v_max, side='right')
+
+        if start_idx >= end_idx:
+            continue
+
+        # 选择切片并投影
+        if slice_axis == 'y':
+            data_slice = counts[start_idx:end_idx, :]
+        else:  # slice_axis == 'x'
+            data_slice = counts[:, start_idx:end_idx]
+        
+        projected_counts = np.sum(data_slice, axis=sum_axis)
+        
+        # 准备输出
+        key = f"{v_min:.1f} to {v_max:.1f}"
+        projected_hists[key] = (projection_edges, projected_counts)
+
+    return projected_hists
+
+
+def plot_projections(projection_groups, slice_axis_name, xlabel, normalize_to=None, **kwargs):
+    """
+    绘制多组一维投影直方图的对比图。
+
+    参数:
+    ----------
+    projection_groups : dict
+        一个字典，键是组的标签（如 "Data", "MC"），值是 project_2d_histogram 返回的字典。
+    slice_axis_name : str
+        切片轴的名称（如 "Truth", "Reco"），用于生成标签。
+    normalize_to : float, optional
+        如果提供，所有直方图的面积将被归一化到此值。默认为 None（不归一化）。
+    **kwargs :
+        传递给 plt.figure 的其他关键字参数，例如 figsize。
+    """
+    if not projection_groups:
+        print("Warning: projection_groups 字典为空，无法绘图。")
+        return
+
+    first_group = next(iter(projection_groups.values()))
+    slice_keys = list(first_group.keys())
+    num_plots = len(slice_keys)
+
+    # 1. 创建纵向排列、共享x轴的子图
+    fig, axes = plt.subplots(num_plots, 1, sharex=True,
+                             gridspec_kw={"hspace": 0.3}, **kwargs)
+    axes = np.atleast_1d(axes).flatten()
+
+    for i, slice_key in enumerate(slice_keys):
+        ax = axes[-i-1]
+        for group_label, projections in projection_groups.items():
+            if slice_key not in projections:
+                continue
+
+            edges, counts = projections[slice_key]
+            
+            if normalize_to is not None:
+                bin_widths = np.diff(edges)
+                integral = np.sum(counts)
+                if integral > 0:
+                    scale = normalize_to / integral
+                    counts = counts * scale
+            
+            ax.stairs(counts, edges, label=group_label, fill=False)
+
+        # 2. 将切片范围用text标注在子图里
+        v_min_str, v_max_str = slice_key.split(' to ')
+        label_text = slice_axis_name + fr"$\in ({v_min_str}, {v_max_str})$"
+        ax.text(1, 1.01, label_text, transform=ax.transAxes,
+                fontsize='x-small', ha='right', va='bottom',)
+
+        ax.yaxis.set_major_locator(plt.MaxNLocator(2))
+        ax.yaxis.set_label_coords(-0.1, 0.5)
+    axes[0].legend()
+    # 3. 共用x轴，只在最下方的图标注xlabel
+    axes[-1].set_xlabel(xlabel)
+    # 4. 共用y轴，只标注一个ylabel
+    fig.supylabel(fr"$\text{{Counts (Norm. to {normalize_to})}}$" if normalize_to is not None else r"$\text{Counts}$")
+
+    return fig
+
+def plot_2d_slides(hist: HistFactory, slice_axis, slice_num, 
+                   slice_axis_name, xlabel, normalize_to=None, **kwargs):
+    if isinstance(hist, HistFactory):
+        groups = {}
+        for key, val in hist.staff_dict.items():
+            groups[key] = project_2d_histogram(val.get_numpy(), slice_axis, slice_num)
+
+        return plot_projections(groups, slice_axis_name, xlabel, normalize_to=normalize_to, **kwargs)
+    elif isinstance(hist, HistStaff):
+        groups = {
+            hist.name: project_2d_histogram(hist.histogram, slice_axis, slice_num)
+        }
+        return plot_projections(groups, slice_axis_name, xlabel, normalize_to=normalize_to, **kwargs)
