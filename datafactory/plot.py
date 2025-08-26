@@ -67,7 +67,7 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
     # 设置图片大小
     figsize = kargs.get("figsize", (4,4))
     # 是否在 pull plot 里放 chi2
-    plot_chi2_pos = kargs.get("plot_chi2_pos", None)
+    plot_chi2_pos = kargs.get("plot_chi2_pos", (0.98, 1.23))
         
     # 将 TH1F 对象转换为 numpy 数组
     x_data, y_data, yerr_data, x_edge_data = data.get_numpy()
