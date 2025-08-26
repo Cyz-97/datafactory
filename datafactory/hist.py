@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Self
 from copy import copy, deepcopy
 from numbers import Number
+import os
 
 import ROOT as R
 
@@ -176,12 +177,17 @@ class HistStaff(Staff):
             self.dimension = self.histogram.GetDimension()
             pass
         elif self.path is not None:
-            with R.TFile.Open(self.path, "read") as f:
-                temp_hist = f.Get(self.name)
+            if ":" in self.path:
+                path, obj_name = self.path.split(":", 1)
+            else:
+                path = self.path
+                obj_name = self.name
+            with R.TFile.Open(path, "read") as f:
+                temp_hist = f.Get(obj_name)
                 if temp_hist:
                     temp_hist.SetDirectory(R.nullptr)
                 else:
-                    print(f"Warning: there is no {self.name} object in {self.path}")
+                    print(f"Warning: there is no {obj_name} object in {path}")
                     temp_hist = None
                 
             self.histogram = temp_hist    
@@ -342,6 +348,33 @@ class HistFactory(Factory):
     def __post_init__(self):
         self.load()
 
+    def _check_root_object(self, spec: str):
+        """
+        输入格式: 'path.root:objectName'
+        返回: (exists, message)
+        """
+        if ":" not in spec:
+            return os.path.isfile(spec)
+
+        path, obj_name = spec.split(":", 1)
+
+        # 检查文件存在
+        if not os.path.isfile(path):
+            return False
+
+        f = R.TFile.Open(path, "READ")
+        if not f or f.IsZombie():
+            return False
+
+        obj = f.Get(obj_name)
+
+        if not obj:
+            return False
+        else:
+            f.Close()
+            return True
+
+
     def load(self):
         if self.staff_dict is not None:
             # print(self.staff_dict)
@@ -349,7 +382,10 @@ class HistFactory(Factory):
         elif self.path_dict is not None:
             self.staff_dict = {}
             for name, path in self.path_dict.items():
-                # print(name)
+                if self._check_root_object(path) == False:
+                    print(f"HistFactory.load(): {path} not exist.")
+                    continue
+
                 temp = HistStaff(name=name,
                                  path=path,
                                  type=self.type_dict.get(name, StaffType.other))
@@ -450,6 +486,7 @@ class HistFactory(Factory):
     def norm_to(self, count_dict: int | float):
         for name, staff in self.staff_dict.items():
             if name in count_dict.keys():
+                # print(name, count_dict[name])
                 staff.norm_to(count_dict[name])
 
     def get_norm_factor(self, count_dict: int | float):
@@ -463,3 +500,12 @@ class HistFactory(Factory):
     def append(self, histstaff: HistStaff):
         self.staff_dict[histstaff.name] = copy(histstaff)
         self.type_dict[histstaff.name] = histstaff.type
+
+    def remove_empty(self):
+        empty_keys = []
+        for name, staff in self.staff_dict.items():
+            if staff.histogram.Integral() < 1e-16:
+                empty_keys.append(name)
+        for name in empty_keys:
+            self.staff_dict.pop(name)
+            self.type_dict.pop(name)
