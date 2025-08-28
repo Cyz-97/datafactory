@@ -763,3 +763,67 @@ class RDFFactory(Factory):
             staff.set_cuts(head + new.cuts)
 
         return new
+
+    def pop(self, key: str):
+        """
+        从工厂中移除并返回名为 `key` 的 RDFStaff。
+        
+        参数
+        ----
+        key : str
+            要剔除的 staff 名称（通常就是样本名）
+        返回
+        ----
+        RDFStaff
+            被移除的 RDFStaff；若 key 不存在且提供了 default，则返回 default
+        """
+        if key in self.staff_dict:
+            removed = self.staff_dict.pop(key)
+            self.type_dict.pop(key, None)
+            self.xsec_dict.pop(key, None)
+            return removed
+        else:
+            return None 
+    
+    def append(self, staff: RDFStaff) -> bool:
+        """
+        Append a single RDFStaff into this factory.
+
+        - Ensures the incoming staff is an RDFStaff and its name is unused.
+        - Synchronizes factory-level configs (tree names, pre-cut names, range, necessary columns).
+        - Makes sure RDF/pre-cut tree are loaded (in case the staff was constructed without __post_init__).
+        - Updates path/xsec/type dictionaries so weights & saving continue to work.
+        - Applies classify cuts (if any) followed by the factory's current cuts.
+        """
+        # basic checks
+        if not isinstance(staff, RDFStaff):
+            return False
+        key = staff.name
+        if key in self.staff_dict:
+            # don't overwrite existing
+            return False
+
+        # sync config from factory -> staff (keeps behavior consistent)
+        staff.pre_cut_names = self.pre_cut_names
+        staff.range = self.range
+        staff.necessary_columns = list(self.necessary_columns)  # copy for safety
+
+        # ensure the staff is ready (if constructed bypassing __post_init__)
+        if getattr(staff, "rdf", None) is None:
+            staff.load()
+            staff.pre_selection()
+
+        # register into the factory
+        self.staff_dict[key] = staff
+        # keep these dicts in sync so get_weights()/save() keep working
+        self.path_dict[key] = staff.path
+        self.xsec_dict[key] = float(staff.xsec) if staff.xsec is not None else 1.0
+        self.type_dict[key] = staff.type
+
+        # apply classify head (if any) + the factory's current cuts
+        head = self.classify_dict.get(key, [])
+        if isinstance(head, CutFlow):
+            head = [head]
+        staff.set_cuts(head + self.cuts)
+
+        return True
