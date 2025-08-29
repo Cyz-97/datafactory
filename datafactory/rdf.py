@@ -272,10 +272,11 @@ class RDFStaff(Staff):
         new.__REUSE_DF__ = self.__REUSE_DF__
 
         # 4) rewrap ROOT nodes to the same underlying graphs (no reload)
-        new.rdf = R.RDF.AsRNode(self.rdf) if getattr(self, "rdf", None) is not None else None
-        new.pre_cut_tree = (R.RDF.AsRNode(self.pre_cut_tree)
-                            if getattr(self, "pre_cut_tree", None) is not None else None)
-
+        # new.rdf = R.RDF.AsRNode(self.rdf) if getattr(self, "rdf", None) is not None else None
+        # new.pre_cut_tree = (R.RDF.AsRNode(self.pre_cut_tree)
+        #                     if getattr(self, "pre_cut_tree", None) is not None else None)
+        new.rdf = self.rdf if getattr(self, "rdf", None) is not None else None
+        new.pre_cut_tree = self.pre_cut_tree if getattr(self, "pre_cut_tree", None) is not None else None
         # 5) rebuild pre_cut_chain from the copied pre_cut_tree (fresh RResultPtr)
         new.pre_cut_chain = {}
         # ensure we have names

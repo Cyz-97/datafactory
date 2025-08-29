@@ -423,7 +423,7 @@ class HistFactory(Factory):
             if name in other.staff_dict.keys():
                 res.staff_dict[name] = staff.concatenate(other.staff_dict[name])
             else:
-                print(f"Warning: no histogram for {name}, concatenate a zero histogram.")
+                # print(f"Warning: no histogram for {name}, concatenate a zero histogram.")
                 fake_hist = list(other.staff_dict.values())[0].histogram.Clone()
                 fake_hist.Reset()
                 
