@@ -150,7 +150,7 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
     chi2 = np.sum(
         np.divide( (baseline - y_data_norm)**2, 
                    (np.hypot(baseline_err, yerr_data_norm))**2,
-                   where = np.hypot(baseline_err, yerr_data_norm) != 0,
+                   where = baseline_err*yerr_data_norm != 0,
                    out = np.zeros_like(baseline)
         )
     )
