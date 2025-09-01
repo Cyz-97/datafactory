@@ -479,7 +479,10 @@ class HistFactory(Factory):
                 raise ValueError("The two element are different in keys.")
             
             for name, staff in res.staff_dict.items():
-                res.staff_dict[name] *= other[name]
+                if name in other:
+                    res.staff_dict[name] *= other[name]
+                else:
+                    print(f"HistFacotry.__mul__: no key {name} in weights")
 
         return res
 
@@ -507,5 +510,7 @@ class HistFactory(Factory):
             if staff.histogram.Integral() < 1e-16:
                 empty_keys.append(name)
         for name in empty_keys:
-            self.staff_dict.pop(name)
-            self.type_dict.pop(name)
+            if name in self.staff_dict:
+                self.staff_dict.pop(name)
+            if name in self.type_dict:
+                self.type_dict.pop(name)
