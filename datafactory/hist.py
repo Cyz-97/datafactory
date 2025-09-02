@@ -6,6 +6,7 @@ from numbers import Number
 import os
 
 import ROOT as R
+import numpy as np
 
 
 def TH12Numpy(hist):
@@ -309,6 +310,57 @@ class HistStaff(Staff):
         else:
             pass
 
+    # --- UHI conversion ----------------------------------------
+    def get_uhi(self):
+        """
+        Convert a HistStaff (TH1/TH2) into a UHI-compatible boost_histogram.Histogram.
+
+        Returns
+        -------
+        bh.Histogram
+            A histogram with Variable axes and Weight storage (values + variances).
+        """
+        import hist as hist
+        import numpy as np
+
+        if self.histogram is None or self.dimension == 0:
+            raise ValueError("HistStaff2UHI: empty histogram in self.")
+
+        if self.dimension == 1:
+            # x, content, err, x_edge
+            _, content, err, x_edge = self.get_numpy()
+            h = hist.Hist(
+                hist.axis.Variable(np.asarray(x_edge, dtype=float),
+                                name = 'name'),
+                storage=hist.storage.Weight()
+            )
+            
+            view = h.view()
+            view['value'][...] = content
+            view['variance'][...] = err
+            return h
+
+        elif self.dimension == 2:
+            # x_edge, y_edge, z (y,x), err (y,x)
+            x_edge, y_edge, z, err = self.get_numpy()
+            # boost-histogram uses axis order [x, y]; our TH22Numpy returns shape (y, x)
+            z_xy = np.asarray(z, dtype=float).T
+            v_xy = (np.asarray(err, dtype=float)**2).T
+
+            h = hist.Hist(
+                hist.Variable(np.asarray(x_edge, dtype=float)),
+                hist.Variable(np.asarray(y_edge, dtype=float)),
+                storage=hist.storage.Weight()
+            )
+            view = h.view()
+            view.value[:, :] = z_xy
+            view.variance[:, :] = v_xy
+            return h
+
+        else:
+            raise NotImplementedError("HistStaff2UHI currently supports 1D and 2D histograms only.")
+
+
     def concatenate(self, other: Self) -> Self:
         import numpy as np
 
@@ -403,6 +455,8 @@ class HistFactory(Factory):
 
     def get_numpy(self):
         return {key: val.get_numpy() for key, val in self.staff_dict.items()}
+    def get_uhi(self):
+        return {key: val.get_uhi() for key, val in self.staff_dict.items()}
 
     def sum(self, type_list: List[StaffType] = [StaffType.signal, StaffType.background]) -> HistStaff:
         self._get_value()
