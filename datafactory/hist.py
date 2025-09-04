@@ -558,6 +558,12 @@ class HistFactory(Factory):
         self.staff_dict[histstaff.name] = copy(histstaff)
         self.type_dict[histstaff.name] = histstaff.type
 
+    def pop(self, name):
+        if name in self.staff_dict:
+            self.staff_dict.pop(name)
+        if name in self.type_dict:
+            self.type_dict.pop(name)
+
     def remove_empty(self):
         empty_keys = []
         for name, staff in self.staff_dict.items():
