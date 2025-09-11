@@ -472,7 +472,6 @@ class RDFFactory(Factory):
     # Configuration options with defaults
     type_dict: Dict[str, StaffType] = field(default_factory=dict)
     tree_name: str = "evt"
-    tree_name: str = "evt"
     pre_cut_tree_name: str = "cut"
     cuts: List[str] = field(default_factory=list)
     classify_dict: Dict[str, str] = field(default_factory=dict)
