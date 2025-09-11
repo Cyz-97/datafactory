@@ -3,8 +3,10 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Self
 from copy import copy, deepcopy
 from numbers import Number
+import os
 
 import ROOT as R
+import numpy as np
 
 
 def TH12Numpy(hist):
@@ -176,12 +178,17 @@ class HistStaff(Staff):
             self.dimension = self.histogram.GetDimension()
             pass
         elif self.path is not None:
-            with R.TFile.Open(self.path, "read") as f:
-                temp_hist = f.Get(self.name)
+            if ":" in self.path:
+                path, obj_name = self.path.split(":", 1)
+            else:
+                path = self.path
+                obj_name = self.name
+            with R.TFile.Open(path, "read") as f:
+                temp_hist = f.Get(obj_name)
                 if temp_hist:
                     temp_hist.SetDirectory(R.nullptr)
                 else:
-                    print(f"Warning: there is no {self.name} object in {self.path}")
+                    print(f"Warning: there is no {obj_name} object in {path}")
                     temp_hist = None
                 
             self.histogram = temp_hist    
@@ -277,6 +284,14 @@ class HistStaff(Staff):
                          histogram=self.histogram.Clone(),
                          type = self.type)
     
+    def __deepcopy__(self, memo):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        self._get_value(self)
+        return HistStaff(name=self.name, 
+                         histogram=self.histogram.Clone(),
+                         type = self.type)
+    
     def get_eff(self, other: Self):
         self._get_value(self)
         self._get_value(other)
@@ -294,6 +309,57 @@ class HistStaff(Staff):
             return TH22Numpy(self.histogram)
         else:
             pass
+
+    # --- UHI conversion ----------------------------------------
+    def get_uhi(self):
+        """
+        Convert a HistStaff (TH1/TH2) into a UHI-compatible boost_histogram.Histogram.
+
+        Returns
+        -------
+        bh.Histogram
+            A histogram with Variable axes and Weight storage (values + variances).
+        """
+        import hist as hist
+        import numpy as np
+
+        if self.histogram is None or self.dimension == 0:
+            raise ValueError("HistStaff2UHI: empty histogram in self.")
+
+        if self.dimension == 1:
+            # x, content, err, x_edge
+            _, content, err, x_edge = self.get_numpy()
+            h = hist.Hist(
+                hist.axis.Variable(np.asarray(x_edge, dtype=float),
+                                name = 'name'),
+                storage=hist.storage.Weight()
+            )
+            
+            view = h.view()
+            view['value'][...] = content
+            view['variance'][...] = err
+            return h
+
+        elif self.dimension == 2:
+            # x_edge, y_edge, z (y,x), err (y,x)
+            x_edge, y_edge, z, err = self.get_numpy()
+            # boost-histogram uses axis order [x, y]; our TH22Numpy returns shape (y, x)
+            z_xy = np.asarray(z, dtype=float).T
+            v_xy = (np.asarray(err, dtype=float)**2).T
+
+            h = hist.Hist(
+                hist.Variable(np.asarray(x_edge, dtype=float)),
+                hist.Variable(np.asarray(y_edge, dtype=float)),
+                storage=hist.storage.Weight()
+            )
+            view = h.view()
+            view.value[:, :] = z_xy
+            view.variance[:, :] = v_xy
+            return h
+
+        else:
+            raise NotImplementedError("HistStaff2UHI currently supports 1D and 2D histograms only.")
+
 
     def concatenate(self, other: Self) -> Self:
         import numpy as np
@@ -334,6 +400,33 @@ class HistFactory(Factory):
     def __post_init__(self):
         self.load()
 
+    def _check_root_object(self, spec: str):
+        """
+        输入格式: 'path.root:objectName'
+        返回: (exists, message)
+        """
+        if ":" not in spec:
+            return os.path.isfile(spec)
+
+        path, obj_name = spec.split(":", 1)
+
+        # 检查文件存在
+        if not os.path.isfile(path):
+            return False
+
+        f = R.TFile.Open(path, "READ")
+        if not f or f.IsZombie():
+            return False
+
+        obj = f.Get(obj_name)
+
+        if not obj:
+            return False
+        else:
+            f.Close()
+            return True
+
+
     def load(self):
         if self.staff_dict is not None:
             # print(self.staff_dict)
@@ -341,7 +434,10 @@ class HistFactory(Factory):
         elif self.path_dict is not None:
             self.staff_dict = {}
             for name, path in self.path_dict.items():
-                # print(name)
+                if self._check_root_object(path) == False:
+                    print(f"HistFactory.load(): {path} not exist.")
+                    continue
+
                 temp = HistStaff(name=name,
                                  path=path,
                                  type=self.type_dict.get(name, StaffType.other))
@@ -359,6 +455,8 @@ class HistFactory(Factory):
 
     def get_numpy(self):
         return {key: val.get_numpy() for key, val in self.staff_dict.items()}
+    def get_uhi(self):
+        return {key: val.get_uhi() for key, val in self.staff_dict.items()}
 
     def sum(self, type_list: List[StaffType] = [StaffType.signal, StaffType.background]) -> HistStaff:
         self._get_value()
@@ -376,7 +474,16 @@ class HistFactory(Factory):
     def concatenate(self, other: Self) -> Self:
         res = deepcopy(self)
         for name, staff in self.staff_dict.items():
-            res.staff_dict[name] = staff.concatenate(other.staff_dict[name])
+            if name in other.staff_dict.keys():
+                res.staff_dict[name] = staff.concatenate(other.staff_dict[name])
+            else:
+                # print(f"Warning: no histogram for {name}, concatenate a zero histogram.")
+                fake_hist = list(other.staff_dict.values())[0].histogram.Clone()
+                fake_hist.Reset()
+                
+                res.staff_dict[name] = staff.concatenate(
+                    HistStaff(name = name, histogram = fake_hist, type=self.type_dict[name])
+                )
 
         return res
 
@@ -385,7 +492,14 @@ class HistFactory(Factory):
             staff._get_value(staff)
 
     def __copy__(self):
+        
         return HistFactory(staff_dict={key: copy(val) for key, val in self.staff_dict.items()},
+                           type_dict = deepcopy(self.type_dict))
+
+    def __deepcopy__(self, memo):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        return HistFactory(staff_dict={key: deepcopy(val) for key, val in self.staff_dict.items()},
                            type_dict = deepcopy(self.type_dict))
 
     def __sub__(self, other: Dict[str, Any] | float) -> Self:
@@ -419,13 +533,17 @@ class HistFactory(Factory):
                 raise ValueError("The two element are different in keys.")
             
             for name, staff in res.staff_dict.items():
-                res.staff_dict[name] *= other[name]
+                if name in other:
+                    res.staff_dict[name] *= other[name]
+                else:
+                    print(f"HistFacotry.__mul__: no key {name} in weights")
 
         return res
 
     def norm_to(self, count_dict: int | float):
         for name, staff in self.staff_dict.items():
             if name in count_dict.keys():
+                # print(name, count_dict[name])
                 staff.norm_to(count_dict[name])
 
     def get_norm_factor(self, count_dict: int | float):
@@ -439,3 +557,20 @@ class HistFactory(Factory):
     def append(self, histstaff: HistStaff):
         self.staff_dict[histstaff.name] = copy(histstaff)
         self.type_dict[histstaff.name] = histstaff.type
+
+    def pop(self, name):
+        if name in self.staff_dict:
+            self.staff_dict.pop(name)
+        if name in self.type_dict:
+            self.type_dict.pop(name)
+
+    def remove_empty(self):
+        empty_keys = []
+        for name, staff in self.staff_dict.items():
+            if staff.histogram.Integral() < 1e-16:
+                empty_keys.append(name)
+        for name in empty_keys:
+            if name in self.staff_dict:
+                self.staff_dict.pop(name)
+            if name in self.type_dict:
+                self.type_dict.pop(name)
