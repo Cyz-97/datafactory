@@ -445,7 +445,7 @@ class RDFStaff(Staff):
         """
         import copy
         if self.rdf != None:
-            self.cuts = copy.copy(cuts)
+            self.cuts = copy.deepcopy(cuts)
             iter_rdf = R.RDF.AsRNode(self.rdf)
             for cut in self.cuts:
                 cut.apply_on_rdf(iter_rdf)
