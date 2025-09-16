@@ -574,3 +574,130 @@ class HistFactory(Factory):
                 self.staff_dict.pop(name)
             if name in self.type_dict:
                 self.type_dict.pop(name)
+                
+    def plot(self,
+                 *,
+                 xlabel: str = "",
+                 ylabel: str = r"$\mathrm{Count}$",
+                 norm_by_width: bool = False,
+                 normalize_to_one: bool = False,
+                 yscale: str = "linear",
+                 xlim: Optional[Tuple[float, float]] = None,
+                 ylim: Optional[Tuple[float, float]] = None,
+                 sharey: bool = True,
+                 cols: int = 3,
+                 figsize: Tuple[float, float] = (4,3)):
+        """
+        将所有 HistStaff 分面绘制（每个 staff 一个子图），共享坐标轴，子图间距为 0。
+        不做任何 Data/MC 对比。
+
+        参数
+        ----
+        xlabel, ylabel : 轴标签（仅在整体下方/左侧各显示一次）
+        norm_by_width : 是否按 bin 宽做归一（y/Δx 和 err/Δx）
+        normalize_to_one : 是否将每个分布面积归一为 1（与 norm_by_width 可同时开启）
+        yscale : 'linear' 或 'log'
+        xlim, ylim : 可选的统一坐标范围
+        cols : 分面列数
+        figsize : 画布大小
+        save : 若提供，形如 {'path':'plots','name':'staffs','fmt':'pdf','prefix':'v1'}
+
+        返回
+        ----
+        (fig, axes)
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import os
+        from matplotlib.ticker import MaxNLocator, LogLocator
+
+
+        def _prep(y, err, edges, *, by_width: bool, to_one: bool):
+            widths = np.diff(edges)
+            y_ = y.astype(float).copy()
+            e_ = err.astype(float).copy()
+            if by_width:
+                y_ = np.divide(y_, widths, out=np.zeros_like(y_), where=widths != 0)
+                e_ = np.divide(e_, widths, out=np.zeros_like(e_), where=widths != 0)
+            if to_one:
+                total = np.sum(y)  # 面积用“原始计数”定义；与 by_width 独立
+                if total > 0:
+                    y_ /= total
+                    e_ /= total
+            return y_, e_, widths
+
+        # 仅保留有直方图的 staff（保持插入顺序）
+        names = [k for k, v in self.staff_dict.items() if v.histogram is not None]
+        if not names:
+            raise ValueError("No HistStaff with valid histogram to plot.")
+
+        n = len(names)
+        rows = int(np.ceil(n / cols))
+
+        fig, axes = plt.subplots(rows, cols, figsize=figsize, 
+                                 sharex=True, sharey=sharey)
+        if isinstance(axes, np.ndarray):
+            axes = axes.reshape(rows, cols)
+        else:
+            axes = np.array([[axes]])
+
+        # 子图之间空隙
+        plt.subplots_adjust(wspace=0.0, hspace=0.15)
+
+        # 逐 staff 作图
+        for idx, name in enumerate(names):
+            r, c = divmod(idx, cols)
+            ax = axes[r, c]
+
+            xcent, y, err, edges = self.staff_dict[name].get_numpy()
+            y_show, e_show, widths = _prep(y, err, edges,
+                                           by_width=norm_by_width,
+                                           to_one=normalize_to_one)
+
+            # 用 stairs 画直方图（边为 edges）
+            ax.stairs(y_show, edges, color = 'k')
+            # 右上角标注 staff 名称
+            ax.text(0.97, 0.97, f"${name}$", transform=ax.transAxes,
+                    ha="right", va="top", fontsize="xx-small")
+
+        # # 统一坐标设置与刻度防重叠策略
+        # for r in range(rows):
+        #     for c in range(cols):
+        #         ax = axes[r, c]
+        #         if (r, c) == (0, 0):
+        #             # 仅设置一次全局属性（其余共享）
+        #             if xlim is not None:
+        #                 ax.set_xlim(*xlim)
+        #             if ylim is not None:
+        #                 ax.set_ylim(*ylim)
+        #             ax.set_yscale(yscale)
+        #         # 只有最左列显示 ytick；其余隐藏以避免重叠
+        #         if c != 0:
+        #             ax.tick_params(labelleft=False)
+        #         # 只有最后一行显示 xtick；其余隐藏以避免重叠
+        #         if r != rows - 1:
+        #             ax.tick_params(labelbottom=False)
+
+        for ax in axes.ravel():
+            # 控制刻度密度，减小重叠概率
+            ax.tick_params(axis="both", which="major", labelsize="small")
+            
+            if xlim is not None:
+                ax.set(xlim = xlim)
+            else:
+                ax.set(xmargin=0)
+                
+            if ylim is not None:
+                ax.set(ylim = ylim)
+            ax.set_yscale(yscale)
+            # ax.yaxis.get_offset_text().set_visible(False)
+            if 'log' not in yscale:
+                ax.yaxis.set_major_locator(plt.MaxNLocator(3, prune="upper"))
+            ax.xaxis.set_major_locator(plt.MaxNLocator(5,prune="upper"))
+                    
+        axes[0,0].yaxis.get_offset_text().set_visible(True)
+        # # 总体轴标签（仅显示一次）
+        fig.supxlabel(xlabel)
+        fig.supylabel(ylabel)
+
+        return fig, axes
