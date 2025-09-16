@@ -522,7 +522,15 @@ class RDFStaff(Staff):
         return res
 
     def empty(self):
-        return self.rdf is None
+        if self.rdf is None:
+            return True
+        elif self.rdf.Count().GetValue() == 0:
+            return True
+        elif len(self.cuts)>0:
+            if self.cuts[-1].sample_final.Count().GetValue() == 0:
+                return True
+        else:
+            return False
     
     def define(self, branch_name: str, func_str: str):
         if branch_name in self.rdf.GetColumnNames():
@@ -624,6 +632,8 @@ class RDFFactory(Factory):
         Define a new branch for all RDataFrame
         """
         for key, value in self.staff_dict.items():
+            if value.empty():
+                continue
             value.define(branch_name, formula_str)
 
     def set_cuts(self, cuts: List[CutFlow]):
