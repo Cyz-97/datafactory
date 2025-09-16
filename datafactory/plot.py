@@ -16,7 +16,7 @@ def apply_style():
     plt.style.use(style_path)
 
 
-def compare_mc_data(stack_mc, data, xlabel, **kargs):
+def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     """
     绘制蒙特卡洛数据与实际数据的对比图。
 
@@ -35,7 +35,6 @@ def compare_mc_data(stack_mc, data, xlabel, **kargs):
     返回:
         None
     """
-    from metadata import get_color
     import numpy as np
     import matplotlib.pyplot as plt
     
