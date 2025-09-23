@@ -611,7 +611,7 @@ class HistFactory(Factory):
         import os
         from matplotlib.ticker import MaxNLocator, LogLocator
 
-
+        self._get_value()
         def _prep(y, err, edges, *, by_width: bool, to_one: bool):
             widths = np.diff(edges)
             y_ = y.astype(float).copy()
@@ -680,7 +680,7 @@ class HistFactory(Factory):
 
         for ax in axes.ravel():
             # 控制刻度密度，减小重叠概率
-            ax.tick_params(axis="both", which="major", labelsize="small")
+            ax.tick_params(axis="both", which="major", labelsize="x-small")
             
             if xlim is not None:
                 ax.set(xlim = xlim)
@@ -692,8 +692,8 @@ class HistFactory(Factory):
             ax.set_yscale(yscale)
             # ax.yaxis.get_offset_text().set_visible(False)
             if 'log' not in yscale:
-                ax.yaxis.set_major_locator(plt.MaxNLocator(3, prune="upper"))
-            ax.xaxis.set_major_locator(plt.MaxNLocator(5,prune="upper"))
+                ax.yaxis.set_major_locator(plt.MaxNLocator(4, prune="upper"))
+            ax.xaxis.set_major_locator(plt.MaxNLocator(4,prune="upper"))
                     
         axes[0,0].yaxis.get_offset_text().set_visible(True)
         # # 总体轴标签（仅显示一次）
