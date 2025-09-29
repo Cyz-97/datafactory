@@ -67,6 +67,8 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     figsize = kargs.get("figsize", (4,4))
     # 是否在 pull plot 里放 chi2
     plot_chi2_pos = kargs.get("plot_chi2_pos", (0.98, 1.23))
+    # 是否在 pull plot 上放 MC和Data总数
+    plot_integral_pos = kargs.get("plot_integral_pos", (0.02, 1.23))
         
     # 将 TH1F 对象转换为 numpy 数组
     x_data, y_data, yerr_data, x_edge_data = data.get_numpy()
@@ -227,6 +229,14 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
         ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], fr"$\chi^2/\text{{NDF}} = {chi2_ndf:.3f}$",
                 fontsize = "x-small", horizontalalignment='right', verticalalignment='top',
                 transform = ax2.transAxes)
+    
+    if plot_integral_pos:
+        ax2.text(
+            plot_integral_pos[0],plot_integral_pos[1],
+             fr"$\text{{Total Ratio: }} \text{{Data}}/\text{{MC}} = {data.histogram.Integral():.0f}/{(stack_mc * weights).sum().histogram.Integral():.0f} \sim {data.histogram.Integral()/(stack_mc * weights).sum().histogram.Integral():.2f}$",
+             fontsize = "x-small", horizontalalignment='left', verticalalignment='top',
+            transform = ax2.transAxes
+        )
 
     # 设置 x 轴和 y 轴标签以及范围
     ax2.set(xlabel = xlabel, ylabel = r"$\text{Data/MC}$",
