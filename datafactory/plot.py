@@ -70,6 +70,10 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     # 是否在 pull plot 上放 MC和Data总数
     plot_integral_pos = kargs.get("plot_integral_pos", (0.02, 1.23))
         
+
+    stack_mc._get_value()
+    data._get_value(data)
+
     # 将 TH1F 对象转换为 numpy 数组
     x_data, y_data, yerr_data, x_edge_data = data.get_numpy()
     # 计算每个 bin 的宽度
