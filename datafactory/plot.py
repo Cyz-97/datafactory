@@ -197,7 +197,7 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     ax1.grid(0)
 
     # 计算差异
-    diff = np.divide(y_data_norm, baseline, where = yerr_data_norm != 0, out = np.ones_like(y_data_norm))
+    diff = np.divide(y_data_norm, baseline, where = baseline != 0, out = np.ones_like(y_data_norm))
     # 计算差异误差
     diff_err = np.divide(yerr_data_norm, baseline , where = baseline != 0, out = np.zeros_like(yerr_data))
     # # 绘制差异柱状图
