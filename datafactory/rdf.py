@@ -292,7 +292,7 @@ class RDFStaff(Staff):
             for idx, name in enumerate(new.pre_cut_names):
                 if idx > 14:
                     break
-                new.pre_cut_chain[name] = new.pre_cut_tree.Sum(f"{name}")
+                new.pre_cut_chain[name] = new.pre_cut_tree.Sum(f"{name}").GetValue()
 
         # 6) rebuild CutFlow results against the copied rdf
         #    (copy only declarative parts; then apply_on_rdf to create fresh ROOT handles)
@@ -748,12 +748,15 @@ class RDFFactory(Factory):
         if virtual_xsec == None:
             virtual_xsec = self.xsec_dict
 
-        weights = {key:
-                   self.luminosity *
-                   virtual_xsec[key] /
-                   self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]] if self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]] > 0 else 1
-                   for key in self.staff_dict.keys()
-                   }
+        weights = {}
+        
+        for key in self.staff_dict.keys():
+            init_statistic = self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]]
+            if init_statistic > 0:
+                weights[key] = self.luminosity * virtual_xsec[key] / init_statistic                  
+                print(weights[key])
+            else:
+                weights[key] = 1
         
         return weights
 
@@ -762,12 +765,10 @@ class RDFFactory(Factory):
         从每个 RDFStaff 中获得 Cut Chain 的 pandas.Series，归一化到 weight 之后生成pandas.DataFrame
         """
         import pandas as pd
-        if weight == None:
+        if weight is None:
             weight = self.get_weights()
-            
-        res = []
-        # print(self.staff_dict)
 
+        res = []
         for rdf in self.staff_dict.values():
             # print(rdf.name)
             res.append(rdf.get_cut_chain_table() * weight[rdf.name])
