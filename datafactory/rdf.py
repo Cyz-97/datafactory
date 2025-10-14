@@ -753,8 +753,7 @@ class RDFFactory(Factory):
         for key in self.staff_dict.keys():
             init_statistic = self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]]
             if init_statistic > 0:
-                weights[key] = self.luminosity * virtual_xsec[key] / init_statistic                  
-                print(weights[key])
+                weights[key] = self.luminosity * virtual_xsec[key] / init_statistic  
             else:
                 weights[key] = 1
         
