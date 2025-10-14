@@ -1,3 +1,4 @@
+import os, glob
 from .core import Staff, StaffType, Factory
 from .hist import HistFactory, HistStaff
 from dataclasses import dataclass, field
@@ -147,7 +148,10 @@ class DataInfo:
     
     def __post_init__(self):
         """Convert string energy to float and apply units after initialization."""
-        self.CMSEnergy = float(self.cms_energy) * MeV
+        try:
+            self.CMSEnergy = float(self.cms_energy) * MeV
+        except:
+            self.CMSEnergy = self.cms_energy
         self.Luminosity = self.luminosity * invpb
 
     def set_cuts(self, cut_flow):
@@ -308,34 +312,52 @@ class RDFStaff(Staff):
     def load(self):
         # Create RDataFrame from ROOT file(s)
         if self.path in self.__REUSE_DF__:
+            print("?")
             self.rdf = self.__REUSE_DF__[self.path]
         else:
             chain = R.TChain(self.tree_name)
-            files_added = chain.Add(self.path)
-            if files_added > 0 and chain.GetEntries() > 0:
 
-                try:
-                    R.gErrorIgnoreLevel = R.kFatal 
-                    if self.range is None:
-                        self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
-                            R.RDataFrame(self.tree_name, self.path))
-                    else:
-                        self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
-                            R.RDataFrame(self.tree_name, self.path)).Range(self.range)
+            good_files = []
+            for f in glob.glob(os.path.expanduser(self.path)):
+                tf = R.TFile.Open(f)
+                if not tf or tf.IsZombie():
+                    continue
+                if self.tree_name in tf.GetListOfKeys():
+                    good_files.append(f)
+                tf.Close()
 
-                    self.rdf = self.__REUSE_DF__[self.path]
-                    self.rdf.GetColumnNames()
-                except Exception as e:
-                    # If tree or evt is not found, create a fake RDataFrame
-                    print(f"Warning: Could not find tree '{self.tree_name}' in file '{self.path}'. Creating fake RDataFrame.")
-                    self.__REUSE_DF__[self.path] = self._create_fake_rdf()
-                    self.rdf = self.__REUSE_DF__[self.path]
-                # root_file.Close()
-
-            else:
+            # print(good_files)
+            if len(good_files) == 0:
                 print(f"Warning: Tree '{self.tree_name}' not found or is empty in '{self.path}'. Creating a fake RDataFrame.")
                 self.__REUSE_DF__[self.path] = self._create_fake_rdf()
                 self.rdf = self.__REUSE_DF__[self.path]
+
+            for f in good_files:
+                chain.Add(f)
+
+            # if chain.GetEntries() > 0:
+            try:
+                R.gErrorIgnoreLevel = R.kFatal 
+                if self.range is None:
+                    self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
+                        R.RDataFrame(chain.Clone()))
+                else:
+                    self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
+                        R.RDataFrame(chain.Clone())).Range(self.range)
+
+                self.rdf = self.__REUSE_DF__[self.path]
+                self.rdf.GetColumnNames()
+            except Exception as e:
+                # If tree or evt is not found, create a fake RDataFrame
+                print(f"Warning: Could not find tree '{self.tree_name}' in file '{self.path}'. Creating fake RDataFrame.")
+                self.__REUSE_DF__[self.path] = self._create_fake_rdf()
+                self.rdf = self.__REUSE_DF__[self.path]
+            # root_file.Close()
+
+            # else:
+            #     print(f"Warning: Tree '{self.tree_name}' has no entries. Creating a fake RDataFrame.")
+            #     self.__REUSE_DF__[self.path] = self._create_fake_rdf()
+            #     self.rdf = self.__REUSE_DF__[self.path]
 
 
     def _create_fake_rdf(self):
@@ -347,7 +369,10 @@ class RDFStaff(Staff):
         fake_rdf = R.RDataFrame(1)  # DataFrame with 1 entry
         fake_rdf = fake_rdf.Define("fake_var", "-1")  # Add a dummy column
         for column in self.necessary_columns:
-            fake_rdf = fake_rdf.Define(column, "-1.e99")  # Add a dummy column
+            if "[]" in column:
+                fake_rdf = fake_rdf.Define(column.replace("[]",""), "ROOT::VecOps::RVec<double>({})")  # Add a dummy column
+            else:
+                fake_rdf = fake_rdf.Define(column, "-1.e99")  # Add a dummy column
         # Filter out all entries to make it effectively empty
         fake_rdf = fake_rdf.Filter("fake_var > 0")  # This will result in 0 entries
         return R.RDF.AsRNode(fake_rdf)
@@ -384,11 +409,11 @@ class RDFStaff(Staff):
 
         # save cut chain
         cut_df = R.RDataFrame(1)
-        cut_df = cut_df.Define("N0", f"{self.pre_cut_chain['N0'].GetValue()}")
+        cut_df = cut_df.Define("N0", f"{self.pre_cut_chain['N0']}")
         for idx, name in enumerate(self.pre_cut_chain.keys()):
             if idx > 0:
                 cut_df = cut_df.Define(
-                    f"N{idx}", f"{self.pre_cut_chain[name].GetValue()}")
+                    f"N{idx}", f"{self.pre_cut_chain[name]}")
         for cut in self.cuts:
             cut_df = cut_df.Define(cut.name, f"{cut.count_final.GetValue()}")
 
@@ -432,7 +457,11 @@ class RDFStaff(Staff):
             if idx > 14: # Generally, the number of cut layers for the files output by BOSS will not be greater than 7.
                 break
             else:
-                self.pre_cut_chain[name] = self.pre_cut_tree.Sum(f"{name}")
+                temp = self.pre_cut_tree.Sum(f"{name}")
+                if hasattr(temp, "GetValue"):
+                    self.pre_cut_chain[name] = temp.GetValue()
+                else:
+                    self.pre_cut_chain[name] = temp
                 
     def set_cuts(self, cuts: List[CutFlow]):
         """
@@ -517,18 +546,22 @@ class RDFStaff(Staff):
         import pandas as pd
 
         cut_chain_names = list(self.pre_cut_chain.keys()) + [elem.name for elem in self.cuts]
-        cut_counts = [i.GetValue() for i in self.pre_cut_chain.values()] + [elem.count_final.GetValue() for elem in self.cuts]
+        cut_counts = [i for i in self.pre_cut_chain.values()] + [elem.count_final.GetValue() for elem in self.cuts]
         res = pd.Series(dict(zip(cut_chain_names, cut_counts)), name = "$" + self.name + "$")
         return res
 
     def empty(self):
         if self.rdf is None:
             return True
-        elif self.rdf.Count().GetValue() == 0:
-            return True
-        elif len(self.cuts)>0:
+        elif len(self.cuts) > 0:
             if self.cuts[-1].sample_final.Count().GetValue() == 0:
                 return True
+            else:
+                return False
+        elif list(self.pre_cut_chain.values())[-1] == 0:
+            return True
+        # elif self.rdf.Count().GetValue() == 0:
+        #     return True
         else:
             return False
     
@@ -701,8 +734,12 @@ class RDFFactory(Factory):
             The stacked histogram of the final selected events.
         """
         self.set_cuts(self.cuts)
-        hists_dict = {i: self.staff_dict[i].get_histstaff(
-            func) for i in self.staff_dict.keys() if not self.staff_dict[i].empty()}
+        hists_dict = {}
+        for i in self.staff_dict.keys():
+            if self.staff_dict[i].empty():
+                continue
+            hists_dict[i] = self.staff_dict[i].get_histstaff(func) 
+
         res = HistFactory(staff_dict=hists_dict, type_dict=self.type_dict)
         return res
     
@@ -714,7 +751,7 @@ class RDFFactory(Factory):
         weights = {key:
                    self.luminosity *
                    virtual_xsec[key] /
-                   self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]].GetValue() if self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]].GetValue() > 0 else 1
+                   self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]] if self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]] > 0 else 1
                    for key in self.staff_dict.keys()
                    }
         

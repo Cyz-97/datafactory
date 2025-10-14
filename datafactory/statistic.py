@@ -62,7 +62,8 @@ def fit_mc_data(mc_hist, data_hist, artificial_model = False):
     rdh_data = R.RooDataHist("data_rdh", "Data", R.RooArgList(x), data_hist.histogram)
     rdh_mc = {}
     for key, value in mc_hist.staff_dict.items():
-        rdh_mc[key] = R.RooDataHist(f"rdh_{key}", f"rdh_{key}", R.RooArgList(x), value.histogram)
+        if value.histogram.Integral() > 10:
+          rdh_mc[key] = R.RooDataHist(f"rdh_{key}", f"rdh_{key}", R.RooArgList(x), value.histogram)
     # 3. Convert to PDFs
     pdf_mc = {key: R.RooHistPdf(f"pdf_{key}", f"pdf_{key}", R.RooArgList(x), value) for key, value in rdh_mc.items()}
     # 5. Fit fractions (or yields)
