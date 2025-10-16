@@ -16,6 +16,240 @@ def apply_style():
     plt.style.use(style_path)
 
 
+# ==========================
+#   Compare two 1D hists    #
+# ==========================
+def compare_hist1d(hist_a: HistStaff, hist_b: HistStaff, xlabel: str, **kargs):
+    """
+    将两个 HistStaff 的 1D 直方图在同一张图上进行对比，并在下方给出 A/B 的比值。
+
+    参数:
+        hist_a (HistStaff): 第一个直方图（例如 Data 或 MC-A 的总直方图）。
+        hist_b (HistStaff): 第二个直方图（例如 MC-B 的总直方图）。
+        xlabel (str): x 轴标签。
+
+    关键字参数:
+        weight_a (float): A 的整体权重，默认 1.0。
+        weight_b (float): B 的整体权重，默认 1.0。
+        datainfo (str | object): 显示在主图右上角（可为自定义对象，使用 str()）。
+        xlim (tuple): x 轴范围。
+        ylim (tuple): y 轴范围（主图）。
+        yscale (str): y 轴标度，默认 "linear"。
+        ylabel (str): y 轴标签，默认 r"$\\mathrm{Count}$"。
+        norm_by_width (bool): 是否按 bin 宽度归一，默认 False。
+        figsize (tuple): 画布大小，默认 (4,4)。
+        legend_title (str): 图例标题。
+        label_a (str): A 的图例名称，默认 "A"。
+        label_b (str): B 的图例名称，默认 "B"。
+        plot_chi2_pos (tuple|None): 在比值图中放置 χ²/ndf 的位置；若为 None 则不显示。
+        plot_integral_pos (tuple|None): 在比值图中显示积分信息的位置；若为 None 则不显示。
+        save (dict|None): 若提供，保存图片。键包含 {"path","name","prefix","fmt"}。
+        gof (str|None): 若提供，拟合优度检验方式，"chi2" 或 "ks"（ROOT TH1::KolmogorovTest）。
+    返回:
+        (ax1, ax2): 上下两个轴对象。
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+
+    # 解析参数
+    weight_a = kargs.get("weight_a", 1.0)
+    weight_b = kargs.get("weight_b", 1.0)
+    datainfo = kargs.get("datainfo", None)
+    xlim = kargs.get("xlim", None)
+    ylim = kargs.get("ylim", None)
+    yscale = kargs.get("yscale", "linear")
+    ylabel = kargs.get("ylabel", r"$\mathrm{Count}$")
+    norm_by_width = kargs.get("norm_by_width", False)
+    figsize = kargs.get("figsize", (4,4))
+    legend_title = kargs.get("legend_title", None)
+    label_a = kargs.get("label_a", hist_a.name)
+    label_b = kargs.get("label_b", hist_b.name)
+    plot_chi2_pos = kargs.get("plot_chi2_pos", (0.98, 1.23))
+    # 拟合优度（可选）：chi2 或 Kolmogorov–Smirnov (KS)
+    gof = kargs.get("gof", "chi2")
+    plot_integral_pos = kargs.get("plot_integral_pos", (0.02, 1.23))
+    save = kargs.get("save", None)
+    show_diff = kargs.get("show_diff", False)
+    diff_ylim = kargs.get("diff_ylim", None)
+    diff_ylabel = kargs.get("diff_ylabel", r"$\text{Diff.}$")
+
+    # 确保值已准备
+    hist_a._get_value(hist_a)
+    hist_b._get_value(hist_b)
+
+    # 提取 numpy 数据
+    x_a, y_a, ye_a, xedge_a = hist_a.get_numpy()
+    x_b, y_b, ye_b, xedge_b = hist_b.get_numpy()
+
+    # 检查 binning 一致性
+    import numpy as _np
+    if not (_np.allclose(xedge_a, xedge_b) and len(xedge_a) == len(xedge_b)):
+        raise ValueError("compare_hist1d: A 与 B 的 bin 边界不一致，请先在外部对齐/重建到相同 binning 后再比较。")
+
+    bin_w = _np.diff(xedge_a)
+
+    # 归一/加权
+    if norm_by_width:
+        yA = (y_a / bin_w) * weight_a
+        eA = (ye_a / bin_w) * weight_a
+        yB = (y_b / bin_w) * weight_b
+        eB = (ye_b / bin_w) * weight_b
+    else:
+        yA = y_a * weight_a
+        eA = ye_a * weight_a
+        yB = y_b * weight_b
+        eB = ye_b * weight_b
+
+    # 根据 show_diff 动态调整子图数量与画布高度
+    if show_diff:
+        fig = plt.figure(figsize=(figsize[0], figsize[1] * 1.25))  # 适当增高
+        ax1, ax2, ax3 = fig.subplots(3, 1, sharex=True,
+                                      gridspec_kw={'height_ratios': [4, 1, 1], 'hspace': 0.12})
+    else:
+        fig = plt.figure(figsize=figsize)
+        ax1, ax2 = fig.subplots(2, 1, sharex=True,
+                                gridspec_kw={'height_ratios': [4, 1], 'hspace': 0.12})
+
+    # 主图：stair + 误差带
+    edges = _np.hstack([x_a[0] - bin_w[0]/2, x_a + bin_w/2])
+    # print(label_a, label_b)
+
+    ax1.errorbar(x_a, yA, yerr = eA, label=f"${label_a}$", marker="o", ms=1.5,
+                 color="black", ls="", lw=0.4)
+    ax1.stairs(yB, edges, label=f"${label_b}$", lw=0.8, color = "black")
+
+    # 误差带（灰色）
+    ax1.bar(x_b, 2*eB, width=bin_w, bottom=yB-eB,
+            hatch="//////////", hatch_linewidth=0.6, fill=False, lw=0, ls="",
+            facecolor="black", ec = "black", alpha=0.6, label=f"${label_b}"+ r"\pm \sigma_{\text{stat}}$")
+
+    # DataInfo
+    if datainfo is not None:
+        ax1.text(1, 1.02, "$" + str(datainfo) + "$", fontsize="x-small",
+                 ha='right', transform=ax1.transAxes)
+
+    # 轴范围
+    if "log" in yscale and ylim is None:
+        ymin, ymax = 0.8, max(_np.max(yA), _np.max(yB)) * 200
+    elif ylim is None:
+        ymin, ymax = 0, max(_np.max(yA), _np.max(yB)) * 2
+    else:
+        ymin, ymax = ylim
+    ax1.set(ylabel=ylabel, ylim=(ymin, ymax), yscale=yscale)
+
+    # 图例
+    ax1.legend(title=legend_title, loc="best", ncol=2, handlelength=1.5, fontsize=6, columnspacing=0.8)
+
+    # 比值与误差传播 r = A/B
+    with _np.errstate(divide='ignore', invalid='ignore'):
+        ratio = _np.divide(yA, yB, where=yB!=0, out=_np.ones_like(yA))
+        ratio_err = _np.abs(_np.divide(eA, yB, where=yB!=0, out=_np.ones_like(yA)))
+
+    # 在比值图中画出 B 的相对误差带（灰色区），中心为 1
+    residual_b = _np.divide(eB, yB, where=yB!=0, out=_np.zeros_like(yB))
+    ax2.bar(x_a, 2*residual_b, width=bin_w, bottom=1-residual_b,
+            hatch="//////////", hatch_linewidth=0.6, fill=False, lw=0, ls="",
+            facecolor="black", ec = "black", alpha=0.6)
+
+    # A/B 误差棒
+    ax2.errorbar(x_a, ratio, xerr=0, yerr=ratio_err, marker="o", ms=1.5,
+                 color="black", ls="", lw=0.4)
+
+    if plot_chi2_pos is not None and gof is not None:
+        if str(gof).lower() == "chi2":
+            denom = _np.hypot(eA, eB)
+            chi2 = _np.sum(_np.divide((yA - yB)**2, denom**2,
+                                      where=denom!=0, out=_np.zeros_like(denom)))
+            ndf = int(_np.sum((yA * yB) > 0))
+            chi2_ndf = chi2/ndf if ndf > 0 else 0.0
+            ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], r"$\chi^2/\text{NDF} = %.3f$" % chi2_ndf,
+                     fontsize="x-small", ha='right', va='top', transform=ax2.transAxes)
+        else:
+            # KS 两样本检验（直接使用 ROOT 的 TH1::KolmogorovTest）
+            # 使用原始 ROOT 直方图进行形状比较；按整体权重缩放，但保持 ROOT 默认的归一（shape-only）
+            hA = hist_a.histogram.Clone("ks_tmpA")
+            hB = hist_b.histogram.Clone("ks_tmpB")
+            try:
+                if float(weight_a) != 1.0:
+                    hA.Scale(float(weight_a))
+                if float(weight_b) != 1.0:
+                    hB.Scale(float(weight_b))
+                # ROOT 缺省会对两者归一化后进行 KS 检验；空字符串即为标准设置
+                pval = float(hA.KolmogorovTest(hB, ""))
+            finally:
+                pass  # 交由 Python GC 回收临时克隆
+
+            ax2.text(plot_chi2_pos[0], plot_chi2_pos[1],
+                     rf"$\text{{KS test}}:~p={pval:.3f}$",
+                     fontsize="x-small", ha='right', va='top', transform=ax2.transAxes)
+
+    # 积分信息（使用 ROOT 积分并乘整体权重，更符合事件统计）
+    if plot_integral_pos is not None:
+        int_a = hist_a.histogram.Integral() * float(weight_a)
+        int_b = hist_b.histogram.Integral() * float(weight_b)
+        ratio_int = (int_a / int_b) if int_b != 0 else _np.nan
+        ax2.text(plot_integral_pos[0], plot_integral_pos[1],
+                 fr"$\text{{Integral: }} {int_a:.2f}/{int_b:.2f} \sim {ratio_int:.2f}$",
+                 fontsize="x-small", ha='left', va='top', transform=ax2.transAxes)
+
+    # 轴标签与范围
+    if show_diff:
+        ax2.set(ylabel=r"$\text{Ratio}$", xlim=xlim, ylim=(0.2, 1.8))
+    else:
+        ax2.set(xlabel=xlabel, ylabel=r"$\text{Ratio}$", xlim=xlim, ylim=(0.2, 1.8))
+    ax2.axhline(y=1, color='black', linestyle='-', lw=0.5)
+    ax2.grid(0)
+    ax2.yaxis.set_major_locator(plt.MaxNLocator(4))
+
+    if show_diff:
+        # 差值面板: A - B 及其误差
+        # 背景：B 的绝对误差带（中心 0）；点误差：A 的误差
+        diff = yA - yB
+        diff_err = eA
+
+        # 用 B 的误差在 0 附近画灰色带
+        ax3.bar(x_a, 2*eB, width=bin_w, bottom=-eB,
+                hatch="//////////", hatch_linewidth=0.6, fill=False, lw=0, ls="",
+                facecolor="black", ec="black", alpha=0.6)
+
+        # (A-B) 误差棒
+        ax3.errorbar(x_a, diff, xerr=0, yerr=diff_err, marker="o", ms=1.5,
+                     color="black", ls="", lw=0.4)
+
+        # 零线
+        ax3.axhline(y=0, color='black', linestyle='-', lw=0.5)
+
+        # y 轴范围
+        if diff_ylim is None:
+            _max = _np.nanmax(_np.abs(diff)) if diff.size else 1.0
+            _band = _np.nanmax(eB) if eB.size else 0.0
+            _m = max(1e-12, _max + _band)
+            ax3.set_ylim(-1.3*_m, 1.3*_m)
+        else:
+            ax3.set_ylim(diff_ylim)
+
+        # 轴标签
+        ax3.set(ylabel=diff_ylabel, xlabel=xlabel)
+
+        # 风格与刻度
+        ax3.grid(0)
+        ax3.yaxis.set_major_locator(plt.MaxNLocator(3))
+
+    # 保存（可选）
+    if save is not None:
+        out_name = f"{save.get('prefix','compare')}_{save.get('name','hist1d')}.{save.get('fmt','png')}"
+        plt.savefig(os.path.join(save['path'], out_name))
+
+    # 调整位置
+    ax1.yaxis.set_label_coords(-0.1, 0.5)
+    ax2.yaxis.set_label_coords(-0.1, 0.5)
+    if show_diff:
+        ax3.yaxis.set_label_coords(-0.1, 0.5)
+        return ax1, ax2, ax3
+    else:
+        return ax1, ax2
+
 def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     """
     绘制蒙特卡洛数据与实际数据的对比图。
