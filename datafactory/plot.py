@@ -160,7 +160,7 @@ def compare_hist1d(hist_a: HistStaff, hist_b: HistStaff, xlabel: str, **kargs):
         if str(gof).lower() == "chi2":
             denom = _np.hypot(eA, eB)
             chi2 = _np.sum(_np.divide((yA - yB)**2, denom**2,
-                                      where=denom!=0, out=_np.zeros_like(denom)))
+                                      where=(yA>0)&(yB>0), out=_np.zeros_like(denom)))
             ndf = int(_np.sum((yA * yB) > 0))
             chi2_ndf = chi2/ndf if ndf > 0 else 0.0
             ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], r"$\chi^2/\text{NDF} = %.3f$" % chi2_ndf,
