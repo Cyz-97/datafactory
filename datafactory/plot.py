@@ -159,10 +159,14 @@ def compare_hist1d(hist_a: HistStaff, hist_b: HistStaff, xlabel: str, **kargs):
     if plot_chi2_pos is not None and gof is not None:
         if str(gof).lower() == "chi2":
             denom = _np.hypot(eA, eB)
-            chi2 = _np.sum(_np.divide((yA - yB)**2, denom**2,
-                                      where=(yA>0)&(yB>0), out=_np.zeros_like(denom)))
+            chi2 = _np.divide((yA - yB)**2, denom**2,
+                                      where=(yA * yB) > 0,
+                            out=_np.zeros_like(denom))
+            # remove outlayers
+            chi2 = _np.sort(chi2)[0:-2]
             ndf = int(_np.sum((yA * yB) > 0))
-            chi2_ndf = chi2/ndf if ndf > 0 else 0.0
+            # print(chi2, len(chi2), ndf)
+            chi2_ndf = _np.sum(chi2)/ndf if ndf > 0 else 0.0
             ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], r"$\chi^2/\text{NDF} = %.3f$" % chi2_ndf,
                      fontsize="x-small", ha='right', va='top', transform=ax2.transAxes)
         else:
