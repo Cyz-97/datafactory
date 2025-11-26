@@ -392,12 +392,14 @@ class HistStaff(Staff):
 
     def plot(self, xlabel, ax = None):
         import matplotlib.pyplot as plt
+
+
         if ax is None:
             ax = plt.figure().subplots(1)
         
         if self.dimension == 1:
             x, y, yerr, edge = self.get_numpy()
-            ax.stairs(y, edge, label = self.name )
+            ax.stairs(y, edge, label = self.name)
         elif self.dimension == 2:
             x, y, z, zerr = self.get_numpy()
             c = ax.pcolormesh(x,y,z)

@@ -254,6 +254,338 @@ def compare_hist1d(hist_a: HistStaff, hist_b: HistStaff, xlabel: str, **kargs):
     else:
         return ax1, ax2
 
+def compare_hist1d_multi2one(hist_a_list: list, hist_b, xlabel: str, **kargs):
+    """
+    将一个 HistStaff 列表与一个基准 HistStaff (hist_b) 进行对比。
+    主图显示所有直方图，下方子图显示 list 中每个 hist 与 hist_b 的比值或差值。
+
+    参数:
+        hist_a_list (list[HistStaff]): 直方图列表（作为比较对象）。
+        hist_b (HistStaff): 基准直方图（作为分母/减数，通常是 Data 或 Standard MC）。
+        xlabel (str): x 轴标签。
+
+    关键字参数 (kargs):
+        weight_a (float | list[float]): A 列表的权重。若是标量则应用到所有，若是列表需与 hist_a_list 等长。
+        weight_b (float): B 的整体权重，默认 1.0。
+        label_a (str | list[str]): A 列表的图例名称。若是列表需等长；若未提供则尝试读取 hist.name。
+        label_b (str): B 的图例名称，默认 hist_b.name。
+        datainfo (str | object): 显示在主图右上角（可为自定义对象，使用 str()）。
+        xlim (tuple): x 轴范围。
+        ylim (tuple): y 轴范围（主图）。
+        yscale (str): y 轴标度，默认 "linear"。
+        ylabel (str): y 轴标签，默认 r"$\\mathrm{Count}$"。
+        norm_by_width (bool): 是否按 bin 宽度归一，默认 False。
+        figsize (tuple): 画布大小，默认 (4,4)。
+        legend_title (str): 图例标题。
+        label_a (str): A 的图例名称，默认 "A"。
+        label_b (str): B 的图例名称，默认 "B"。
+        plot_chi2_pos (tuple|None): 在比值图中放置 χ²/ndf 的位置；若为 None 则不显示。
+        plot_integral_pos (tuple|None): 在比值图中显示积分信息的位置；若为 None 则不显示。
+        save (dict|None): 若提供，保存图片。键包含 {"path","name","prefix","fmt"}。
+        hspace (float): 子图之间的空隙
+        gof (str|None): 若提供，拟合优度检验方式，"chi2" 或 "ks"（ROOT TH1::KolmogorovTest）。
+    返回:
+        (ax1, ax2): 上下两个轴对象。
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+    from itertools import cycle
+
+    # --- 兼容性处理：如果传入的是单个对象，转为列表 ---
+    if not isinstance(hist_a_list, (list, tuple)):
+        hist_a_list = [hist_a_list]
+
+    # --- 解析通用参数 ---
+    weight_a_in = kargs.get("weight_a", 1.0)
+    weight_b = kargs.get("weight_b", 1.0)
+    label_a_in = kargs.get("label_a", None)
+    label_b = kargs.get("label_b", getattr(hist_b, "name", "Ref"))
+    
+    # 处理权重列表
+    if isinstance(weight_a_in, (list, tuple)):
+        if len(weight_a_in) != len(hist_a_list):
+            raise ValueError("weight_a 列表长度必须与 hist_a_list 一致")
+        weights_a = weight_a_in
+    else:
+        weights_a = [weight_a_in] * len(hist_a_list)
+
+    # 处理标签列表
+    if isinstance(label_a_in, (list, tuple)):
+        if len(label_a_in) != len(hist_a_list):
+            raise ValueError("label_a 列表长度必须与 hist_a_list 一致")
+        labels_a = label_a_in
+    else:
+        # 如果没给 list，尝试用 hist.name，如果 hist.name 也没有，则用 A_0, A_1...
+        labels_a = []
+        for i, h in enumerate(hist_a_list):
+            if label_a_in is not None:
+                labels_a.append(f"{label_a_in}_{i}")
+            else:
+                labels_a.append(getattr(h, "name", f"A_{i}"))
+
+    # 其他绘图参数
+    datainfo = kargs.get("datainfo", None)
+    xlim = kargs.get("xlim", None)
+    ylim = kargs.get("ylim", None)
+    yscale = kargs.get("yscale", "linear")
+    ylabel = kargs.get("ylabel", r"$\mathrm{Count}$")
+    norm_by_width = kargs.get("norm_by_width", False)
+    figsize = kargs.get("figsize", (4, 4))
+    legend_title = kargs.get("legend_title", None)
+    
+    plot_chi2_pos = kargs.get("plot_chi2_pos", (0.98, 1.23))
+    gof = kargs.get("gof", "chi2")
+    plot_integral_pos = kargs.get("plot_integral_pos", (0.02, 1.23))
+    save = kargs.get("save", None)
+    show_diff = kargs.get("show_diff", False)
+    diff_ylim = kargs.get("diff_ylim", None)
+    diff_ylabel = kargs.get("diff_ylabel", r"$\text{Diff.}$")
+    hspace = kargs.get("hspace", 0.12)
+
+    # --- 准备基准数据 (Hist B) ---
+    hist_b._get_value(hist_b)
+    x_b, y_b, ye_b, xedge_b = hist_b.get_numpy()
+    bin_w = np.diff(xedge_b)
+    
+    # 归一化/加权 B
+    if norm_by_width:
+        yB = (y_b / bin_w) * weight_b
+        eB = (ye_b / bin_w) * weight_b
+    else:
+        yB = y_b * weight_b
+        eB = ye_b * weight_b
+
+    # --- 初始化画布 ---
+    if show_diff:
+        fig = plt.figure(figsize=(figsize[0], figsize[1] * 1.25))
+        ax1, ax2, ax3 = fig.subplots(3, 1, sharex=True,
+                                     gridspec_kw={'height_ratios': [4, 1, 1], 'hspace': hspace})
+    else:
+        fig = plt.figure(figsize=figsize)
+        ax1, ax2 = fig.subplots(2, 1, sharex=True,
+                                gridspec_kw={'height_ratios': [4, 1], 'hspace': hspace})
+
+    # --- 绘制基准 (Hist B) ---
+    # 使用 stairs 绘制 B 的轮廓
+    edges_b = np.hstack([x_b[0] - bin_w[0]/2, x_b + bin_w/2])
+    ax1.stairs(yB, edges_b, label=f"${label_b}$", lw=0.8, color = "black", zorder=0)
+    
+    # B 的误差带（灰色阴影）
+    ax1.bar(x_b, 2*eB, width=bin_w, bottom=yB-eB,
+            hatch="//////////", hatch_linewidth=0.6, fill=False, lw=0, ls="",
+            facecolor="black", ec = "black", alpha=0.6, label=f"${label_b}"+ r"\pm \sigma_{\text{stat}}$", zorder=0)
+
+    # --- 准备循环绘制 A 列表 ---
+    # 获取颜色循环
+    prop_cycle = plt.rcParams['axes.prop_cycle']
+    colors = cycle(prop_cycle.by_key()['color'])
+
+    # 用于收集统计信息的文本列表
+    chi2_texts = []
+    int_texts = []
+    
+    # 用于自动计算 Y 轴范围
+    max_y_val = np.max(yB)
+
+    # --- 循环处理每个 Hist A ---
+    for i, (hist_a, w_a, lbl_a) in enumerate(zip(hist_a_list, weights_a, labels_a)):
+        curr_color = next(colors)
+        
+        # 1. 数据准备
+        hist_a._get_value(hist_a)
+        x_a, y_a_raw, ye_a_raw, xedge_a = hist_a.get_numpy()
+
+        # 检查 Binning
+        if not (np.allclose(xedge_a, xedge_b) and len(xedge_a) == len(xedge_b)):
+            raise ValueError(f"Hist A[{i}] ({lbl_a}) 与 B 的 bin 边界不一致。")
+
+        # 归一化/加权 A
+        if norm_by_width:
+            yA = (y_a_raw / bin_w) * w_a
+            eA = (ye_a_raw / bin_w) * w_a
+        else:
+            yA = y_a_raw * w_a
+            eA = ye_a_raw * w_a
+        
+        max_y_val = max(max_y_val, np.max(yA))
+
+        # 2. 绘制主图 (Ax1)
+        ax1.errorbar(x_a, yA, yerr=eA, label=f"${lbl_a}$", marker="o", ms=1.5,
+                 color = curr_color, ls="", lw=0.4, zorder=10+i)
+
+        # 3. 计算比值 (Ratio)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = np.divide(yA, yB, where=yB != 0, out=np.ones_like(yA))
+            # 误差传播: (A/B) * sqrt((dA/A)^2 + (dB/B)^2) 
+            # 这里仅绘制 A 的统计误差对 Ratio 的贡献，通常 B 的误差画在背景带上
+            ratio_err = np.abs(np.divide(eA, yB, where=yB != 0, out=np.zeros_like(yA)))
+
+        # 绘制 Ratio 点
+        ax2.errorbar(x_a, ratio, xerr=0, yerr=ratio_err, marker="o", ms=1.5,
+                 color=curr_color, ls="", lw=0.4, zorder=10+i)
+
+        # 添加箭头指示超出 ylim 范围的点
+        ratio_ylim = (0.2, 1.8)
+        for x, y, yerr in zip(x_a, ratio, ratio_err):
+            upper = y
+            lower = y
+            if upper > ratio_ylim[1]:
+                # 向上箭头，指示超过上界
+                ax2.annotate('', xy=(x, ratio_ylim[1]), xytext=(x, 1.2),
+                            arrowprops=dict(arrowstyle='simple', 
+                                            color=curr_color, 
+                                            lw=0.2, alpha = 0.5,
+                                            mutation_scale=4),
+                            ha='center')
+            elif lower < ratio_ylim[0]:
+                # 向下箭头，指示低于下界
+                ax2.annotate('', xy=(x, ratio_ylim[0]*1.0), xytext=(x, 0.8),
+                            arrowprops=dict(arrowstyle='simple', 
+                                            color=curr_color, 
+                                            alpha = 0.5, 
+                                            lw=0.4, 
+                                            mutation_scale=4),
+                            ha='center')
+
+        # 4. 计算差值 (Diff) - 可选
+        if show_diff:
+            diff = yA - yB
+            diff_err = eA # 仅 A 的误差，B 的误差在背景
+            ax3.errorbar(x_a, diff, yerr=diff_err, xerr=0, marker="o", ms=1.5,
+                     color=curr_color, ls="", lw=0.4)
+
+        # 5. 统计检验 (Chi2 / KS)
+        stat_str = ""
+        if plot_chi2_pos is not None and gof is not None:
+            if str(gof).lower() == "chi2":
+                # Chi2 计算
+                denom = np.hypot(eA, eB)
+                chi2_arr = np.divide((yA - yB)**2, denom**2, where=(yA * yB > 0), out=np.zeros_like(denom))
+                # 简单的去除异常值策略（可根据需要移除）
+                # chi2_arr = np.sort(chi2_arr)[0:-2] 
+                ndf = int(np.sum((yA * yB) > 0))
+                chi2_val = np.sum(chi2_arr)
+                chi2_ndf = chi2_val/ndf if ndf > 0 else 0.0
+                stat_str = r"$\chi^2/\text{ndf}(%s) = %.2f$" % (lbl_a, chi2_ndf)
+            else:
+                # KS Test (ROOT)
+                hA_clone = hist_a.histogram.Clone(f"ks_A_{i}")
+                hB_clone = hist_b.histogram.Clone(f"ks_B_{i}")
+                try:
+                    if float(w_a) != 1.0: hA_clone.Scale(float(w_a))
+                    if float(weight_b) != 1.0: hB_clone.Scale(float(weight_b))
+                    pval = float(hA_clone.KolmogorovTest(hB_clone, ""))
+                finally:
+                    pass
+                stat_str = rf"$\text{{KS}}(%s) p=%.3f$" % (lbl_a, pval)
+            
+            # 设置颜色以便区分
+            # 为避免 LaTeX 解析颜色名称的麻烦，这里简单存储字符串，颜色可以后续手动加或不加
+            chi2_texts.append(stat_str)
+
+        # 6. 积分信息
+        if plot_integral_pos is not None:
+            # 注意：这里用 ROOT 的原始积分 * 权重，更准确
+            int_a = hist_a.histogram.Integral() * float(w_a)
+            # B 的积分只需要算一次，但为了格式化方便，这里每次循环如果不算 B 就很难对齐
+            # 所以我们只存 A 的积分，最后统一显示
+            int_texts.append(f"{lbl_a}: {int_a:.1f}")
+
+    # --- 绘制公共部分 (Ratio/Diff 背景) ---
+    
+    # Ratio 背景：B 的相对误差带 (中心为1)
+    residual_b = np.divide(eB, yB, where=yB != 0, out=np.zeros_like(yB))
+    ax2.bar(x_b, 2*residual_b, width=bin_w, bottom=1-residual_b,
+            hatch="//////////", hatch_linewidth=0.6, fill=False, lw=0, ls="",
+            facecolor="black", ec="black", alpha=0.4, zorder=0)
+    ax2.axhline(y=1, color='black', linestyle='-', lw=0.4)
+
+    # Diff 背景：B 的绝对误差带 (中心为0)
+    if show_diff:
+        ax3.bar(x_b, 2*eB, width=bin_w, bottom=-eB,
+                hatch="//////////", hatch_linewidth=0.5, fill=False, lw=0, ls="",
+                facecolor="black", ec="black", alpha=0.4, zorder=0)
+        ax3.axhline(y=0, color='black', linestyle='-', lw=0.4)
+
+    # --- 打印统计文本 ---
+    if chi2_texts:
+        # 将列表拼接为多行字符串
+        full_chi2_str = "\n".join(chi2_texts)
+        ax2.text(plot_chi2_pos[0], plot_chi2_pos[1], full_chi2_str,
+                 fontsize="x-small", ha='right', va='bottom', transform=ax2.transAxes)
+
+    if plot_integral_pos is not None:
+        int_b = hist_b.histogram.Integral() * float(weight_b)
+        # 首行显示 B，后续行显示 A list
+        header = f"${label_b}: {int_b:.1f}$"
+        body = "\n".join([f"${t}$" for t in int_texts])
+        full_int_str = header + "\n" + body
+        ax2.text(plot_integral_pos[0], plot_integral_pos[1], full_int_str,
+                 fontsize="x-small", ha='left', va='bottom', transform=ax2.transAxes)
+
+    # --- 设置样式与范围 ---
+    
+    # DataInfo
+    if datainfo is not None:
+        ax1.text(1, 1.02, "$" + str(datainfo) + "$", fontsize="x-small",
+                 ha='right', transform=ax1.transAxes)
+
+    # 主图 Y 轴范围
+    if "log" in yscale and ylim is None:
+        ymin, ymax = 0.8, max_y_val * 200
+    elif ylim is None:
+        ymin, ymax = 0, max(np.max(yA), np.max(yB)) * 2
+    else:
+        ymin, ymax = ylim
+    ax1.set(ylabel=ylabel, ylim=(ymin, ymax), yscale=yscale)
+    
+    # 图例 (根据 list 长度动态调整列数)
+    ncol = 2 if len(hist_a_list) < 4 else 3
+    ax1.legend(title=legend_title, loc="best", ncol=ncol, 
+               handlelength=1.5, fontsize=6, columnspacing=0.8)
+
+    # Ratio 轴设置
+    ax2.set(ylabel=r"$\text{Ratio}$", xlim=xlim, ylim=(0.2, 1.8))
+    if not show_diff:
+        ax2.set(xlabel=xlabel)
+    ax2.grid(False)
+    ax2.yaxis.set_major_locator(plt.MaxNLocator(4))
+
+    # Diff 轴设置
+    if show_diff:
+        if diff_ylim is None:
+             # 简单估算范围，避免 NaN
+            _max = 0
+            # 需重新遍历获取最大 diff (略繁琐，这里简化处理，取最后一组的量级或固定)
+            # 更稳妥的是在上面循环中记录 max_diff
+            _max = np.nanmax(np.abs(diff)) if diff.size else 1.0
+            _band = np.nanmax(eB) if eB.size else 0.0
+            _m = max(1e-12, _max + _band)
+            ax3.set_ylim(-2*_m, 2*_m)
+        else:
+            ax3.set_ylim(diff_ylim)
+        ax3.set(ylabel=diff_ylabel, xlabel=xlabel)
+        ax3.grid(False)
+        ax3.yaxis.set_major_locator(plt.MaxNLocator(3))
+        ax3.yaxis.set_label_coords(-0.1, 0.5)
+
+    # 调整 Label 位置
+    ax1.yaxis.set_label_coords(-0.1, 0.5)
+    ax2.yaxis.set_label_coords(-0.1, 0.5)
+
+    # --- 保存 ---
+    if save is not None:
+        out_name = f"{save.get('prefix','compare')}_{save.get('name','hist1d')}.{save.get('fmt','png')}"
+        if not os.path.exists(save['path']):
+            os.makedirs(save['path'])
+        plt.savefig(os.path.join(save['path'], out_name), bbox_inches='tight')
+
+    if show_diff:
+        return ax1, ax2, ax3
+    else:
+        return ax1, ax2
+
 def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     """
     绘制蒙特卡洛数据与实际数据的对比图。
