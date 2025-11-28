@@ -486,6 +486,7 @@ class HistFactory(Factory):
                 res = deepcopy(staff)
             else:
                 res += staff
+        
         return res
 
     def concatenate(self, other: Self) -> Self:

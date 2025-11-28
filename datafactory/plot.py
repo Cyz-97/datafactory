@@ -639,6 +639,8 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     plot_chi2_pos = kargs.get("plot_chi2_pos", (0.98, 1.23))
     # 是否在 pull plot 上放 MC和Data总数
     plot_integral_pos = kargs.get("plot_integral_pos", (0.02, 1.23))
+    # 约定MC中信号、本底排列顺序
+    mc_order = kargs.get("mc_order",[StaffType.background, StaffType.signal, StaffType.other])
         
 
     stack_mc._get_value()
@@ -694,7 +696,8 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     # 初始化基线误差数组
     baseline_err = np.zeros_like(x_data)
     # 遍历蒙特卡洛数据字典
-    for component_type in [StaffType.background, StaffType.signal, StaffType.other]:
+    print(mc_order)
+    for component_type in mc_order:
         for i in x_mc_col.keys():
             # 绘制柱状图
             if stack_mc.staff_dict[i].type == component_type:
