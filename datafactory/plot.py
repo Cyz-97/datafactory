@@ -696,7 +696,7 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     # 初始化基线误差数组
     baseline_err = np.zeros_like(x_data)
     # 遍历蒙特卡洛数据字典
-    print(mc_order)
+    # print(mc_order)
     for component_type in mc_order:
         for i in x_mc_col.keys():
             # 绘制柱状图

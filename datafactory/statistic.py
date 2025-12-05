@@ -138,3 +138,41 @@ def cut_chain_to_eff_pur(table):
     purity = (purity / purity.loc["Sum",:]) * 100
     # 返回效率和纯度表格
     return eff, purity
+
+def errors_corr_from_covariance_safe(cov):
+    """
+    Extract errors and correlation matrix from covariance, 
+    safely handling zero-variance components.
+
+    Parameters
+    ----------
+    cov : array_like
+        Covariance matrix.
+
+    Returns
+    -------
+    errors : ndarray
+        Standard deviations (sigma_i).
+    corr : ndarray
+        Correlation matrix (with undefined entries set to 0).
+    """
+    cov = np.asarray(cov, dtype=float)
+    if cov.shape[0] != cov.shape[1]:
+        raise ValueError("Covariance matrix must be square.")
+
+    n = cov.shape[0]
+    errors = np.sqrt(np.diag(cov))
+    corr = np.zeros_like(cov)
+
+    for i in range(n):
+        for j in range(n):
+            if errors[i] > 0 and errors[j] > 0:
+                corr[i, j] = cov[i, j] / (errors[i] * errors[j])
+            else:
+                corr[i, j] = 0.0
+
+    # ensure diagonal = 1
+    for i in range(n):
+        corr[i, i] = 1.0
+
+    return errors, corr
