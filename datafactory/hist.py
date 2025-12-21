@@ -390,7 +390,7 @@ class HistStaff(Staff):
     def get_norm_factor(self, count: float):
         return count / self.histogram.Integral()
 
-    def plot(self, xlabel, ax = None):
+    def plot(self, xlabel, ax = None, stair_args = {}):
         import matplotlib.pyplot as plt
 
 
@@ -399,7 +399,7 @@ class HistStaff(Staff):
         
         if self.dimension == 1:
             x, y, yerr, edge = self.get_numpy()
-            ax.stairs(y, edge, label = self.name)
+            ax.stairs(y, edge, label = "$" + self.name + "$", **stair_args)
         elif self.dimension == 2:
             x, y, z, zerr = self.get_numpy()
             c = ax.pcolormesh(x,y,z)
@@ -457,7 +457,7 @@ class HistFactory(Factory):
 
                 temp = HistStaff(name=name,
                                  path=path,
-                                 type=self.type_dict.get(name, StaffType.other))
+                                 type=self.type_dict.get(name, StaffType.background))
                 if temp.histogram is not None:
                     self.staff_dict[name] = temp
                 else:

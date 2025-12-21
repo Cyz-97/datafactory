@@ -1,3 +1,7 @@
+
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any, Tuple
+from hepunits import MeV, GeV, invpb, invnb, invfb, nb, pb, fb
 from .hist import HistStaff, HistFactory
 # from .stat import get_chi2
 
@@ -15,6 +19,74 @@ def apply_style():
     style_path = os.path.join(script_dir, 'style.mplstyle')
     plt.style.use(style_path)
 
+
+
+@dataclass
+class DataInfo:
+    """Class representing data information including CMS energy and luminosity.
+    
+    Attributes:
+        cms_energy: Center-of-mass energy in MeV (provided as string)
+        luminosity: Data luminosity in pb^{-1}
+        path: Optional path to the data
+        mc_process: Optional MC process description
+        cut: List of cuts applied (default empty list)
+    """
+    cms_energy_MeV: str
+    luminosity_invpb: float
+    path: Optional[str] = None
+    mc_process: Optional[str] = None
+    cut: list = field(default_factory=list)
+    en_unit: Optional[str]="MeV"
+    lumi_unit: Optional[str]="invpb"
+
+    def __post_init__(self):
+        """Convert string energy to float and apply units after initialization."""
+        try:
+            self.CMSEnergy = float(self.cms_energy_MeV) * MeV
+        except:
+            self.CMSEnergy = self.cms_energy_MeV
+        self.Luminosity = self.luminosity_invpb * invpb
+
+    def set_cuts(self, cut_flow):
+        """Set the cuts for this data.
+        
+        Args:
+            cut_flow: CutFlow object containing the cuts
+        """
+        self.cut = cut_flow
+
+    def __str__(self):
+        return self.print_label(en_unit=self.en_unit, lumi_unit=self.lumi_unit)
+
+    def __repr__(self):
+        return self.print_label()
+
+    def print_label(self, en_unit="MeV", lumi_unit="invpb"):
+        """Generate a formatted label string with energy and luminosity.
+        
+        Args:
+            en_unit: Energy unit ("MeV" or "GeV")
+            lumi_unit: Luminosity unit ("invpb" or "invnb")
+            
+        Returns:
+            Formatted string with energy and luminosity
+        """
+        if en_unit == "MeV":
+            str_en = f"{self.CMSEnergy / MeV:.0f} \\mathrm{{~MeV}}"
+        elif en_unit == "GeV":
+            str_en = f"{self.CMSEnergy / GeV:.3f} \\mathrm{{~GeV}}"
+        else:
+            str_en = f"{self.CMSEnergy:.0f} \\mathrm{{\\textcolor{{red}}{{Bad unit}}}}"
+
+        if lumi_unit == "invpb":
+            str_lumi = f"{self.Luminosity / invpb:.1f} \\mathrm{{~pb^{{-1}}}}"
+        elif lumi_unit == "invnb":
+            str_lumi = f"{self.Luminosity / invnb:.4f} \\mathrm{{~nb^{{-1}}}}"
+        else:
+            str_lumi = f"{self.Luminosity / invpb:.1f} \\mathrm{{\\textcolor{{red}}{{Bad unit}}}}"
+
+        return str_en + "~(" + str_lumi + ")"
 
 # ==========================
 #   Compare two 1D hists    #
@@ -641,6 +713,8 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     plot_integral_pos = kargs.get("plot_integral_pos", (0.02, 1.23))
     # 约定MC中信号、本底排列顺序
     mc_order = kargs.get("mc_order",[StaffType.background, StaffType.signal, StaffType.other])
+    # legend字体大小
+    legend_font_size = kargs.get("legend_font_size", 5)
         
 
     stack_mc._get_value()
@@ -761,7 +835,7 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     
     # 添加图例
     legend = ax1.legend(title = legend_title,
-               loc = "best", ncol=4, handlelength=1.5, fontsize = 5, columnspacing = 0.5)
+               loc = "best", ncol=4, handlelength=1.5, fontsize = legend_font_size, columnspacing = 0.5)
     
     # 设置图例标题颜色
     if highlight_channel:

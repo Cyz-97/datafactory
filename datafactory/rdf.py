@@ -130,72 +130,6 @@ class CutFlow:
 
 
 @dataclass
-class DataInfo:
-    """Class representing data information including CMS energy and luminosity.
-    
-    Attributes:
-        cms_energy: Center-of-mass energy in MeV (provided as string)
-        luminosity: Data luminosity in pb^{-1}
-        path: Optional path to the data
-        mc_process: Optional MC process description
-        cut: List of cuts applied (default empty list)
-    """
-    cms_energy: str
-    luminosity: float
-    path: Optional[str] = None
-    mc_process: Optional[str] = None
-    cut: list = field(default_factory=list)
-    
-    def __post_init__(self):
-        """Convert string energy to float and apply units after initialization."""
-        try:
-            self.CMSEnergy = float(self.cms_energy) * MeV
-        except:
-            self.CMSEnergy = self.cms_energy
-        self.Luminosity = self.luminosity * invpb
-
-    def set_cuts(self, cut_flow):
-        """Set the cuts for this data.
-        
-        Args:
-            cut_flow: CutFlow object containing the cuts
-        """
-        self.cut = cut_flow
-
-    def __str__(self):
-        return self.print_label()
-
-    def __repr__(self):
-        return self.print_label()
-
-    def print_label(self, en_unit="MeV", lumi_unit="invpb"):
-        """Generate a formatted label string with energy and luminosity.
-        
-        Args:
-            en_unit: Energy unit ("MeV" or "GeV")
-            lumi_unit: Luminosity unit ("invpb" or "invnb")
-            
-        Returns:
-            Formatted string with energy and luminosity
-        """
-        if en_unit == "MeV":
-            str_en = f"{self.CMSEnergy / MeV:.0f} \\mathrm{{~MeV}}"
-        elif en_unit == "GeV":
-            str_en = f"{self.CMSEnergy / GeV:.3f} \\mathrm{{~GeV}}"
-        else:
-            str_en = f"{self.CMSEnergy:.0f} \\mathrm{{\\textcolor{{red}}{{Bad unit}}}}"
-
-        if lumi_unit == "invpb":
-            str_lumi = f"{self.Luminosity / invpb:.1f} \\mathrm{{~pb^{{-1}}}}"
-        elif lumi_unit == "invnb":
-            str_lumi = f"{self.Luminosity / invnb:.4f} \\mathrm{{~nb^{{-1}}}}"
-        else:
-            str_lumi = f"{self.Luminosity / invpb:.1f} \\mathrm{{\\textcolor{{red}}{{Bad unit}}}}"
-
-        return str_en + "~(" + str_lumi + ")"
-
-
-@dataclass
 class RDFStaff(Staff):
     """A class for handling ROOT RDataFrame operations with dataclass support."""
 
@@ -315,43 +249,51 @@ class RDFStaff(Staff):
             print("?")
             self.rdf = self.__REUSE_DF__[self.path]
         else:
-            chain = R.TChain(self.tree_name)
 
-            good_files = []
-            for f in glob.glob(os.path.expanduser(self.path)):
-                tf = R.TFile.Open(f)
-                if not tf or tf.IsZombie():
-                    continue
-                if self.tree_name in tf.GetListOfKeys():
-                    good_files.append(f)
-                tf.Close()
-
-            # print(good_files)
-            if len(good_files) == 0:
-                print(f"Warning: Tree '{self.tree_name}' not found or is empty in '{self.path}'. Creating a fake RDataFrame.")
-                self.__REUSE_DF__[self.path] = self._create_fake_rdf()
+            try: ## Not TTree, maybe RNTuple
+                R.gErrorIgnoreLevel = R.kFatal
+                self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
+                    R.RDataFrame(self.tree_name, self.path)
+                )
                 self.rdf = self.__REUSE_DF__[self.path]
-
-            for f in good_files:
-                chain.Add(f)
-
-            # if chain.GetEntries() > 0:
-            try:
-                R.gErrorIgnoreLevel = R.kFatal 
-                if self.range is None:
-                    self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
-                        R.RDataFrame(chain.Clone()))
-                else:
-                    self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
-                        R.RDataFrame(chain.Clone())).Range(self.range)
-
-                self.rdf = self.__REUSE_DF__[self.path]
-                self.rdf.GetColumnNames()
             except Exception as e:
-                # If tree or evt is not found, create a fake RDataFrame
-                print(f"Warning: Could not find tree '{self.tree_name}' in file '{self.path}'. Creating fake RDataFrame.")
-                self.__REUSE_DF__[self.path] = self._create_fake_rdf()
-                self.rdf = self.__REUSE_DF__[self.path]
+                try: ## Assuming the data structure is TTree
+                    R.gErrorIgnoreLevel = R.kFatal
+                    chain = R.TChain(self.tree_name)
+
+                    good_files = []
+                    for f in glob.glob(os.path.expanduser(self.path)):
+                        tf = R.TFile.Open(f)
+                        print(self.tree_name,  self.tree_name in tf.GetListOfKeys())
+                        if not tf or tf.IsZombie():
+                            continue
+                        if self.tree_name in tf.GetListOfKeys():
+                            good_files.append(f)
+                        tf.Close()
+
+                    if len(good_files) == 0:
+                        print(f"Warning: Tree '{self.tree_name}' not found or is empty in '{self.path}'. Creating a fake RDataFrame.")
+                        self.__REUSE_DF__[self.path] = self._create_fake_rdf()
+                        self.rdf = self.__REUSE_DF__[self.path]
+
+                    for f in good_files:
+                        chain.Add(f)
+
+                    if self.range is None:
+                        self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
+                            R.RDataFrame(chain.Clone()))
+                    else:
+                        self.__REUSE_DF__[self.path] = R.RDF.AsRNode(
+                            R.RDataFrame(chain.Clone())).Range(self.range)
+
+                    self.rdf = self.__REUSE_DF__[self.path]
+                    self.rdf.GetColumnNames()
+                except Exception as e2:
+                        # If tree or evt is not found, create a fake RDataFrame
+                        print(e)
+                        print(f"Warning: Could not find tree '{self.tree_name}' in file '{self.path}'. Creating fake RDataFrame.")
+                        self.__REUSE_DF__[self.path] = self._create_fake_rdf()
+                        self.rdf = self.__REUSE_DF__[self.path]
             # root_file.Close()
 
             # else:
@@ -445,23 +387,65 @@ class RDFStaff(Staff):
             List of names for each pre-selection cut. Default is [].
         """
         # Create RDataFrame from pre-selection tree and calculate pre-selection cut results
-        self.pre_cut_tree = R.RDF.AsRNode(
-            R.RDataFrame(
-                self.pre_cut_tree_name,
-                self.path
-            ))
+        
         self.pre_cut_chain = {}
-        if self.pre_cut_names is None:
-            self.pre_cut_names = [str(i) for i in self.pre_cut_tree.GetColumnNames()]
-        for idx, name in enumerate(self.pre_cut_names):
-            if idx > 14: # Generally, the number of cut layers for the files output by BOSS will not be greater than 7.
-                break
-            else:
-                temp = self.pre_cut_tree.Sum(f"{name}")
-                if hasattr(temp, "GetValue"):
-                    self.pre_cut_chain[name] = temp.GetValue()
+        # def make_rdf_or_empty(path, treename, n0):
+        #     import ROOT as R, os
+        #     if not os.path.exists(path):
+        #         return R.RDataFrame(1).Define("N0", str(n0))
+
+        #     f = R.TFile.Open(path)
+        #     if not f or f.IsZombie():
+        #         return R.RDataFrame(1).Define("N0", str(n0))
+
+        #     obj = f.Get(treename)
+        #     if obj and obj.InheritsFrom("TTree"):
+        #         return R.RDataFrame(obj)
+
+        #     return R.RDataFrame(1).Define("N0", str(n0))
+        
+        # self.pre_cut_tree = make_rdf_or_empty(
+        #     self.path, 
+        #     self.pre_cut_tree_name, 
+        #     n0 = self.rdf.Count().GetValue()
+        # )
+        
+        # if self.pre_cut_names is None:
+        #     self.pre_cut_names = [str(i) for i in self.pre_cut_tree.GetColumnNames()]
+        #     for idx, name in enumerate(self.pre_cut_names):
+        #         if idx > 14: # Generally, the number of cut layers for the files output by BOSS will not be greater than 7.
+        #             break
+        #         else:
+        #             temp = self.pre_cut_tree.Sum(f"{name}")
+        #             if hasattr(temp, "GetValue"):
+        #                 self.pre_cut_chain[name] = temp.GetValue()
+        #             else:
+        #                 self.pre_cut_chain[name] = temp
+
+        if self.pre_cut_names is not None:
+            self.pre_cut_tree = R.RDF.AsRNode(
+                R.RDataFrame(
+                    self.pre_cut_tree_name,
+                    self.path
+                ))
+            if self.pre_cut_names is None:
+                self.pre_cut_names = [str(i) for i in self.pre_cut_tree.GetColumnNames()]
+            for idx, name in enumerate(self.pre_cut_names):
+                if idx > 14: # Generally, the number of cut layers for the files output by BOSS will not be greater than 7.
+                    break
                 else:
-                    self.pre_cut_chain[name] = temp
+                    temp = self.pre_cut_tree.Sum(f"{name}")
+                    if hasattr(temp, "GetValue"):
+                        self.pre_cut_chain[name] = temp.GetValue()
+                    else:
+                        self.pre_cut_chain[name] = temp
+        else:
+            self.pre_cut_tree = R.RDataFrame(1)
+            if self.pre_cut_names is None:
+                self.pre_cut_names = ["N0"]
+                self.pre_cut_chain["N0"] = self.rdf.Count().GetValue()
+                self.pre_cut_tree.Define("N0", f"{self.pre_cut_chain['N0']}")
+            
                 
     def set_cuts(self, cuts: List[CutFlow]):
         """
@@ -637,21 +621,22 @@ class RDFFactory(Factory):
             # 即使 RDFStaff.load 中做了相关的保护，这段保护代码仍然对那些连cut 
             # chain 都没有的文件起作用。
             # 未来需要有一个自检功能，提前检查所有文件的格式，显式给出warning
-            evt_chain = R.TChain(self.tree_name, "Read")
-            evt_chain.Add(value)
-            cut_chain = R.TChain(self.pre_cut_tree_name, "Read")
-            cut_chain.Add(value)
-            if (evt_chain.GetEntries() <= 0) and (cut_chain.GetEntries() <= 0 ):
-                continue
-            else:
-                self.staff_dict[key] = RDFStaff(path = value,
-                                                name = key,
-                                                xsec = self.xsec_dict[key], 
-                                                pre_cut_tree_name = self.pre_cut_tree_name,
-                                                pre_cut_names = self.pre_cut_names,
-                                                range = self.range,
-                                                type = self.type_dict.get(key, StaffType.other),
-                                                necessary_columns = self.necessary_columns)
+            #evt_chain = R.TChain(self.tree_name, "Read")
+            #evt_chain.Add(value)
+            #cut_chain = R.TChain(self.pre_cut_tree_name, "Read")
+            #cut_chain.Add(value)
+            #if (evt_chain.GetEntries() <= 0) and (cut_chain.GetEntries() <= 0 ):
+            #    continue
+            #else:
+            self.staff_dict[key] = RDFStaff(path = value,
+                                            name = key,
+                                            xsec = self.xsec_dict[key], 
+                                            tree_name = self.tree_name,
+                                            pre_cut_tree_name = self.pre_cut_tree_name,
+                                            pre_cut_names = self.pre_cut_names,
+                                            range = self.range,
+                                            type = self.type_dict.get(key, StaffType.other),
+                                            necessary_columns = self.necessary_columns)
             
         # Divide sample into components basing on a set of cuts
         #for key, value in self.classify_dict.items():
