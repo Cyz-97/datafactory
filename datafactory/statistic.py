@@ -1,3 +1,5 @@
+from typing import Optional, Tuple, List, Any
+
 import ROOT as R #, RooFitResult, RooRealVar, RooDataHist, RoohistPdf 
 from .hist import HistFactory, HistStaff
 
@@ -50,56 +52,213 @@ def fuck_roofit_param(fit_result):
         result_dict[param.GetName()] = ( param.getVal(), param.getError())
     return result_dict
 
-def fit_mc_data(mc_hist, data_hist, artificial_model = False):
+from typing import Optional, Tuple, List, Any
+from datafactory.hist import TH12Numpy
+# --- zfit template fit ----------------------------------------
 
-    mc_hist._get_value()
-    data_hist._get_value(data_hist)
+def fit_mc_data(
+    mc_factory: "HistFactory",
+    data: "HistStaff",
+    *,
+    obs_name: str = "x",
+    extended: bool = True,
+    yield_init: Optional[float] = None,
+    yield_bounds: Optional[Tuple[float, float]] = None,
+    minimizer: Optional["zfit.minimize.Minimizer"] = None,
+    constraints: Optional[List[Any]] = None,
+    allow_negative_yields: bool = False,
+):
+    """Fit a (binned) data histogram using a sum of MC template components with zfit.
 
-    x_min = data_hist.histogram.GetXaxis().GetXmin()
-    x_max = data_hist.histogram.GetXaxis().GetXmax()
-    x = R.RooRealVar("x", "s", x_min, x_max)
-    
-    rdh_data = R.RooDataHist("data_rdh", "Data", R.RooArgList(x), data_hist.histogram)
-    rdh_mc = {}
-    for key, value in mc_hist.staff_dict.items():
-        if value.histogram.Integral() > 10:
-          rdh_mc[key] = R.RooDataHist(f"rdh_{key}", f"rdh_{key}", R.RooArgList(x), value.histogram)
-    # 3. Convert to PDFs
-    pdf_mc = {key: R.RooHistPdf(f"pdf_{key}", f"pdf_{key}", R.RooArgList(x), value) for key, value in rdh_mc.items()}
-    # 5. Fit fractions (or yields)
-    n_mc = {key: R.RooRealVar(f"n_{key}", f"n_{key}", mc_hist.staff_dict[key].histogram.Integral(), 0, mc_hist.staff_dict[key].histogram.Integral()*1e4) for key, value in pdf_mc.items()}
-    if artificial_model:
-        a0 = R.RooRealVar("mean", "mean", 1.6854, 1.5, 1.8)
-        a1 = R.RooRealVar("sigma", "sigma", 0.1, 1e-19, 0.2)
-        poly_bkg = R.RooGaussian("pdf_artificial_bkg", "Polynomial background", x, a0, a1)
-        n_poly = R.RooRealVar(r"n_\text{Artificial background}", "PolyBkg yield", 0, 0, 1e6)
-        parameterize_model = [poly_bkg]
-        param_model_yield = [n_poly]
+    This implements a classic template fit:
+      data(bin)  ~  sum_i  N_i * template_i(bin)
+
+    Parameters
+    ----------
+    mc_factory:
+        HistFactory containing MC components (each value must be a 1D TH1-like histogram).
+    data:
+        HistStaff containing the observed data histogram (1D TH1-like).
+    obs_name:
+        Observable name used by zfit/UHI axis naming.
+    extended:
+        If True, each component is treated as an extended PDF with a floating yield parameter N_i.
+        If False, the templates are normalized shapes and combined with floating fractions.
+    yield_init:
+        Initial value for each yield parameter. If None, it is set to (data integral)/(n_components).
+    yield_bounds:
+        Bounds for each yield parameter (min, max). If None, defaults to (0, 10 * data integral).
+        If allow_negative_yields is True, the lower bound will be set to -max(|bound|, 10*sqrt(Ndata)).
+    minimizer:
+        zfit minimizer. If None, uses zfit.minimize.Minuit().
+    constraints:
+        Optional list of zfit constraints to be added to the loss.
+    allow_negative_yields:
+        If True, yields are allowed to go negative (useful for background-subtraction tests).
+
+    Returns
+    -------
+    dict
+        A dictionary with keys:
+          - 'result': zfit fit result
+          - 'yields': dict[name -> fitted yield]
+          - 'yield_params': dict[name -> zfit.Parameter]
+          - 'model': combined zfit PDF
+          - 'loss': zfit loss object
+          - 'data_binned': zfit.data.BinnedData
+          - 'component_pdfs': dict[name -> zfit.pdf.HistogramPDF]
+
+    Notes
+    -----
+    - This function currently supports **1D** histograms.
+    - It assumes all MC components and data are binned identically. If not, it will raise.
+    - zfit binned PDFs are UHI-compatible; we convert ROOT TH1 to a `hist.Hist` (UHI).
+    """
+
+    # Local imports to keep the module import-light unless fitting is used.
+    import numpy as np
+    import zfit
+    import hist as uhi_hist
+
+    # Make sure ROOT objects are materialized (in case they are RResultPtr etc.)
+    mc_factory._get_value()
+    data._get_value(data)
+
+    if data.dimension != 1:
+        raise NotImplementedError("fit_histfactory_to_data_zfit currently supports 1D histograms only.")
+
+    # --- helper: ROOT TH1 -> UHI hist.Hist (with named axis) -----------------
+    def _th1_to_uhi(th1, *, axis_name: str):
+        xcent, counts, err, edges = TH12Numpy(th1)
+        edges = np.asarray(edges, dtype=float)
+        counts = np.asarray(counts, dtype=float)
+        err = np.asarray(err, dtype=float)
+
+        h = uhi_hist.Hist(
+            uhi_hist.axis.Variable(edges, name=axis_name),
+            storage=uhi_hist.storage.Weight(),
+        )
+        view = h.view()
+        view["value"][...] = counts
+        view["variance"][...] = err**2
+        return h
+
+    # --- build data ----------------------------------------------------------
+    if data.histogram is None:
+        raise ValueError("Data histogram is empty.")
+
+    data_uhi = _th1_to_uhi(data.histogram, axis_name=obs_name)
+    data_binned = zfit.data.BinnedData.from_hist(data_uhi)
+    n_data = float(np.sum(data_uhi.view().value))
+
+    # --- build component PDFs ------------------------------------------------
+    component_pdfs: dict[str, zfit.pdf.HistogramPDF] = {}
+    yield_params: dict[str, zfit.Parameter] = {}
+
+    # Determine initial and bounds
+    n_components = len(mc_factory.staff_dict)
+    if n_components == 0:
+        raise ValueError("mc_factory has no components to fit.")
+
+    if yield_init is None:
+        yield_init_val = n_data / max(n_components, 1)
     else:
-        parameterize_model = []
-        param_model_yield = []
+        yield_init_val = float(yield_init)
 
-    # 6. Total PDF
-    model = R.RooAddPdf("model", "Model",
-                        R.RooArgList(list(pdf_mc.values()) + parameterize_model),
-                        R.RooArgList(list(n_mc.values()) + param_model_yield)
-                        )
-    fit_result = model.fitTo(rdh_data, R.RooFit.Save(), R.RooFit.PrintLevel(-1), R.RooFit.Verbose(False))
-    # frame = x.frame(R.RooFit.Title("Fit to data"))
-    # rdh_data.plotOn(frame)
-    # model.plotOn(frame)
-    # i = 0
-    # for key, value in pdf_mc.items():
-    #     model.plotOn(frame, R.RooFit.Components(f"pdf_{key}"), R.RooFit.LineStyle(R.kDashed), R.RooFit.LineColor(R.kRed + i))
-    #     i+=1
-    # model.plotOn(frame, R.RooFit.Components("pdf_artificial_bkg"), R.RooFit.LineStyle(R.kDashed), R.RooFit.LineColor(R.kBlue))
-    # c1 = R.TCanvas()
-    # frame.Draw()
-    # c1.BuildLegend()
-    # # c1.SetLogy()
-    # c1.Draw()
-    fit_param = fuck_roofit_param(fit_result)
-    return fit_result, parameterize_model,fit_param 
+    if yield_bounds is None:
+        y_min = 0.0
+        y_max = max(1.0, 10.0 * max(n_data, 1.0))
+    else:
+        y_min, y_max = float(yield_bounds[0]), float(yield_bounds[1])
+
+    if allow_negative_yields:
+        # Heuristic: allow down to roughly a few sigma of Ndata if no explicit min given.
+        if yield_bounds is None:
+            y_min = -max(10.0 * np.sqrt(max(n_data, 1.0)), 1.0)
+
+    # Reference binning: data
+    ref_edges = data_uhi.axes[0].edges
+
+    for name, staff in mc_factory.staff_dict.items():
+        if staff.histogram is None:
+            continue
+        if staff.dimension != 1:
+            raise NotImplementedError(f"Component '{name}' is not 1D; only 1D is supported.")
+
+        comp_uhi = _th1_to_uhi(staff.histogram, axis_name=obs_name)
+        comp_edges = comp_uhi.axes[0].edges
+        if len(comp_edges) != len(ref_edges) or np.max(np.abs(comp_edges - ref_edges)) > 0:
+            raise ValueError(
+                f"Binning mismatch for component '{name}'. "
+                "All components must have identical bin edges to data."
+            )
+
+        if extended:
+            y = zfit.Parameter(f"N_{name}", staff.histogram.Integral(), y_min, y_max)
+            print(y)
+            pdf = zfit.pdf.HistogramPDF(comp_uhi, extended=y, label=name)
+            yield_params[name] = y
+        else:
+            # Shape-only templates: normalize each component to 1 and fit fractions.
+            # (Fractions are handled after we create all PDFs.)
+            pdf = zfit.pdf.HistogramPDF(comp_uhi, extended=False, label=name)
+
+        component_pdfs[name] = pdf
+
+    if not component_pdfs:
+        raise ValueError("No valid MC component histograms found in mc_factory.")
+
+    # --- build combined model ------------------------------------------------
+    pdfs = list(component_pdfs.values())
+
+    if extended:
+        # Sum of extended binned PDFs -> extended model with total yield = sum_i N_i
+        model = zfit.pdf.BinnedSumPDF(pdfs, label="sum_model")
+        loss = zfit.loss.ExtendedBinnedNLL(model=model, data=data_binned, constraints=constraints)
+    else:
+        # Non-extended: fit fractions (simplex parameterization)
+        # Fix number of fracs = n_pdfs - 1
+        fracs = [
+            zfit.Parameter(f"frac_{i}", 1.0 / len(pdfs), 0.0, 1.0)
+            for i in range(len(pdfs) - 1)
+        ]
+        model = zfit.pdf.BinnedSumPDF(pdfs, fracs=fracs, label="sum_model")
+        loss = zfit.loss.BinnedNLL(model=model, data=data_binned, constraints=constraints)
+
+    # --- minimize ------------------------------------------------------------
+    if minimizer is None:
+        minimizer = zfit.minimize.Minuit()
+
+    result = minimizer.minimize(loss)
+    result.hesse()
+
+    # --- collect yields ------------------------------------------------------
+    yields: dict[str, float] = {}
+    if extended:
+        for name, par in yield_params.items():
+            yields[name] = float(result.params[par]["value"])
+    else:
+        # Convert fitted fractions into yields by scaling to total data count
+        fitted_fracs = [float(result.params[p]["value"]) for p in model.params.values() if p.name.startswith("frac_")]
+        # zfit SumPDF uses n-1 fracs; the last one is implicit
+        if len(pdfs) == 1:
+            frac_all = [1.0]
+        else:
+            last = 1.0 - float(np.sum(fitted_fracs))
+            frac_all = fitted_fracs + [last]
+        for (name, _), frac in zip(component_pdfs.items(), frac_all):
+            yields[name] = float(frac) * n_data
+
+    return {
+        "result": result,
+        "yields": yields,
+        "yield_params": yield_params,
+        "model": model,
+        "loss": loss,
+        "data_binned": data_binned,
+        "component_pdfs": component_pdfs,
+    }
+
 
 
 def cut_chain_to_eff_pur(table):
