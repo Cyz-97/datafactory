@@ -459,6 +459,12 @@ class RDFStaff(Staff):
         import copy
         if self.rdf != None:
             self.cuts = copy.deepcopy(cuts)
+            
+            init_cut = CutFlow(name = "Init", list_bystander={},
+                           formular = "true", latex = r"\text{Init}")
+            if len(cuts) == 0:
+                self.cuts = [init_cut]
+
             iter_rdf = R.RDF.AsRNode(self.rdf)
             for cut in self.cuts:
                 cut.apply_on_rdf(iter_rdf)
@@ -552,8 +558,10 @@ class RDFStaff(Staff):
     def define(self, branch_name: str, func_str: str):
         if branch_name in self.rdf.GetColumnNames():
             self.rdf = self.rdf.Redefine(branch_name, func_str)
+            self.cuts[-1].sample_final = self.cuts[-1].sample_final.Redefine(branch_name, func_str)
         else: 
             self.rdf = self.rdf.Define(branch_name, func_str)
+            self.cuts[-1].sample_final = self.cuts[-1].sample_final.Define(branch_name, func_str)
             # self._column_names = self.rdf.GetColumnNames()
     
     
@@ -664,6 +672,12 @@ class RDFFactory(Factory):
             A list of event selection cuts.
         """
         self.cuts = cuts
+        
+        init_cut = CutFlow(name = "Init", list_bystander={},
+                           formular = "true", latex = r"\text{Init}")
+        if len(cuts) == 0:
+            self.cuts = [init_cut]
+
         for key, value in self.staff_dict.items():
             value.set_cuts( self.classify_dict.get(key, []) + cuts)
 

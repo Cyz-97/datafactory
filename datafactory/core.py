@@ -47,7 +47,7 @@ class Factory(abc.ABC):
     一个数据Staff和多个MC背景Staff。它负责对这些样本进行统一的操作。
     """
     def __init__(self):
-        self.staff_collection = {}
+        self.staff_dict = {}
 
     def add_staff(self, staff: Staff):
         """
@@ -56,9 +56,9 @@ class Factory(abc.ABC):
         参数:
         - staff (Staff): 一个Staff类的实例。
         """
-        if staff.name in self.staff_collection:
+        if staff.name in self.staff_dict:
             print(f"警告：样本 '{staff.name}' 已存在，将被覆盖。")
-        self.staff_collection[staff.name] = staff
+        self.staff_dict[staff.name] = staff
 
     def get_staff(self, name: str) -> Staff:
         """
@@ -70,15 +70,15 @@ class Factory(abc.ABC):
         返回:
         - Staff: 找到的Staff实例，如果不存在则返回None。
         """
-        return self.staff_collection.get(name)
+        return self.staff_dict.get(name)
 
     def __iter__(self):
         """使Factory对象可以被迭代，方便地遍历所有样本。"""
-        return iter(self.staff_collection.values())
+        return iter(self.staff_dict.values())
 
     def __getitem__(self, key):
         """使Factory对象可以通过像字典一样的中括号语法访问样本。"""
-        return self.staff_collection[key]
+        return self.staff_dict[key]
     
 class DataInfo:
     from hepunits import MeV, GeV, invpb, invnb, invfb, nb, pb, fb
