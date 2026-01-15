@@ -190,6 +190,7 @@ class RDFStaff(Staff):
         # Load ROOT file, set cross section, and register pre-selection cuts
         self.load()
         self.pre_selection()
+        self.set_cuts([])
         # self._column_names = self.rdf.GetColumnNames()
 
 
@@ -342,6 +343,9 @@ class RDFStaff(Staff):
 
         ensure_parent_directory(path)
 
+        # 重新 apply cuts，确保新定义的变量传递到 sample final
+        self.set_cuts(self.cuts)
+
         opts_cut = R.RDF.RSnapshotOptions()
         opts_cut.fLazy = False
         opts_cut.fMode = "Update"
@@ -421,7 +425,6 @@ class RDFStaff(Staff):
         #                 self.pre_cut_chain[name] = temp.GetValue()
         #             else:
         #                 self.pre_cut_chain[name] = temp
-
         if self.pre_cut_names is not None:
             self.pre_cut_tree = R.RDF.AsRNode(
                 R.RDataFrame(
@@ -457,14 +460,15 @@ class RDFStaff(Staff):
             List of functions to apply as filters to the RDataFrame.
         """
         import copy
+
         if self.rdf != None:
             self.cuts = copy.deepcopy(cuts)
-            
-            init_cut = CutFlow(name = "Init", list_bystander={},
-                           formular = "true", latex = r"\text{Init}")
-            if len(cuts) == 0:
-                self.cuts = [init_cut]
 
+            if len(self.cuts) == 0:
+                init_cut = CutFlow(name = "Init", list_bystander={},
+                            formular = "true", latex = r"\text{Init}")
+                self.cuts = [init_cut]
+                
             iter_rdf = R.RDF.AsRNode(self.rdf)
             for cut in self.cuts:
                 cut.apply_on_rdf(iter_rdf)
@@ -558,10 +562,10 @@ class RDFStaff(Staff):
     def define(self, branch_name: str, func_str: str):
         if branch_name in self.rdf.GetColumnNames():
             self.rdf = self.rdf.Redefine(branch_name, func_str)
-            self.cuts[-1].sample_final = self.cuts[-1].sample_final.Redefine(branch_name, func_str)
+            # self.cuts[-1].sample_final = self.cuts[-1].sample_final.Redefine(branch_name, func_str)
         else: 
             self.rdf = self.rdf.Define(branch_name, func_str)
-            self.cuts[-1].sample_final = self.cuts[-1].sample_final.Define(branch_name, func_str)
+            # self.cuts[-1].sample_final = self.cuts[-1].sample_final.Define(branch_name, func_str)
             # self._column_names = self.rdf.GetColumnNames()
     
     
@@ -675,11 +679,11 @@ class RDFFactory(Factory):
         
         init_cut = CutFlow(name = "Init", list_bystander={},
                            formular = "true", latex = r"\text{Init}")
-        if len(cuts) == 0:
+        if len(cuts) + len(self.classify_dict) == 0:
             self.cuts = [init_cut]
 
         for key, value in self.staff_dict.items():
-            value.set_cuts( self.classify_dict.get(key, []) + cuts)
+            value.set_cuts( self.classify_dict.get(key, []) + self.cuts)
 
 
     def append_cuts(self, cuts: CutFlow | List[CutFlow]):
