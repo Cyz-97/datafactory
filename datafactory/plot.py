@@ -137,6 +137,8 @@ def compare_hist1d(hist_a: HistStaff, hist_b: HistStaff, xlabel: str, **kargs):
     norm_by_width = kargs.get("norm_by_width", False)
     figsize = kargs.get("figsize", (4, 4))
     legend_title = kargs.get("legend_title", None)
+    legend_font_size = kargs.get("legend_font_size", 'x-small')
+    legend_ncol = kargs.get("legend_ncol", 3)
     label_a = kargs.get("label_a", hist_a.name)
     label_b = kargs.get("label_b", hist_b.name)
     plot_chi2_pos = kargs.get("plot_chi2_pos", (0.98, 1.23))
@@ -214,8 +216,8 @@ def compare_hist1d(hist_a: HistStaff, hist_b: HistStaff, xlabel: str, **kargs):
     ax1.set(ylabel=ylabel, ylim=(ymin, ymax), yscale=yscale)
 
     # 图例
-    ax1.legend(title=legend_title, loc="best", ncol=2,
-               handlelength=1.5, fontsize=6, columnspacing=0.8)
+    ax1.legend(title=legend_title, loc="best", ncol=legend_ncol,
+               handlelength=1.5, fontsize=legend_font_size, columnspacing=0.8)
 
     # 比值与误差传播 r = A/B
     with _np.errstate(divide='ignore', invalid='ignore'):

@@ -261,7 +261,7 @@ def fit_mc_data(
 
 
 
-def cut_chain_to_eff_pur(table):
+def cut_chain_to_eff_pur(table, total_column="N0"):
     """
     将给定的表格转换为效率和纯度的表格。
 
@@ -290,7 +290,7 @@ def cut_chain_to_eff_pur(table):
     # 复制表格以避免修改原始数据
     eff = table.copy()
     # 计算效率，将每列除以第一列（通常是总计数），然后乘以100转换为百分比
-    eff = (eff.T / eff.iloc[:,0].T).T * 100
+    eff = (eff.T / eff.loc[:,total_column].T).T * 100
     # 复制表格以避免修改原始数据
     purity = table.copy()
     # 计算纯度，将每列除以"Sum"行（通常是总计数），然后乘以100转换为百分比
