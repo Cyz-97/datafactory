@@ -162,11 +162,11 @@ class RDFStaff(Staff):
     # weight
     weight: Optional[float] = field(default=1, init=False)
     # pre-selection cut chain
-    pre_cut_chain: List[float] = field(default_factory=list, init=False, repr=False)
+    pre_cut_chain: Dict[str, float] = field(default_factory=dict, init=False, repr=False)
     # pre-selection cut tree
     pre_cut_tree: R.RDataFrame = field(init=False, repr=False)
     # cut applied on the sample: CutFlow
-    cuts: List[CutFlow] = field(default_factory=list[CutFlow], init=False)
+    cuts: List[CutFlow] = field(default_factory=list, init=False)
     # core RDataFrame
     rdf: Any = field(init=False, repr=False)
     
@@ -320,7 +320,9 @@ class RDFStaff(Staff):
         fake_rdf = fake_rdf.Filter("fake_var > 0")  # This will result in 0 entries
         return R.RDF.AsRNode(fake_rdf)
 
-    def save(self, tree_name: str, path: str, var: list[str]):
+    def save(self, tree_name: str, path: str, var: list[str], 
+             truth_classification_count: float | None = None):
+    
         """
         保存处理后的数据到指定路径。
 
@@ -353,13 +355,36 @@ class RDFStaff(Staff):
 
         self.cuts[-1].sample_final.Snapshot(tree_name, path, var, opts_cut)
 
+        # =============================================================================
+        # CHANGELOG
+        # -----------------------------------------------------------------------------
+        # Date      : 2026-01-27 (Asia/Singapore)
+        # Author    : Coo
+        # Module    : RDFStaff.save
+        # Summary   : Persist truth classification effective count into cut tree.
+        #
+        # Motivation:
+        #   - When MC is truth-split into components, the effective base
+        #     statistics is the post-classification count, not file-level N0.
+        #   - Persisting "TruthClassification" makes downstream QA reproducible and
+        #     consistent with RDFFactory.get_cut_chain_table() and get_weights().
+        #
+        # Compatibility:
+        #   - New argument is optional; existing calls remain valid.
+        # =============================================================================
+
         # save cut chain
         cut_df = R.RDataFrame(1)
         cut_df = cut_df.Define("N0", f"{self.pre_cut_chain['N0']}")
+
+        # NEW: truth classification effective count (constant column)
+        if truth_classification_count is not None:
+            cut_df = cut_df.Define("TruthClassification", f"{float(truth_classification_count)}")
+
         for idx, name in enumerate(self.pre_cut_chain.keys()):
             if idx > 0:
-                cut_df = cut_df.Define(
-                    f"N{idx}", f"{self.pre_cut_chain[name]}")
+                cut_df = cut_df.Define(f"N{idx}", f"{self.pre_cut_chain[name]}")
+
         for cut in self.cuts:
             cut_df = cut_df.Define(cut.name, f"{cut.count_final.GetValue()}")
 
@@ -431,8 +456,6 @@ class RDFStaff(Staff):
                     self.pre_cut_tree_name,
                     self.path
                 ))
-            if self.pre_cut_names is None:
-                self.pre_cut_names = [str(i) for i in self.pre_cut_tree.GetColumnNames()]
             for idx, name in enumerate(self.pre_cut_names):
                 if idx > 14: # Generally, the number of cut layers for the files output by BOSS will not be greater than 7.
                     break
@@ -447,7 +470,8 @@ class RDFStaff(Staff):
             if self.pre_cut_names is None:
                 self.pre_cut_names = ["N0"]
                 self.pre_cut_chain["N0"] = self.rdf.Count().GetValue()
-                self.pre_cut_tree.Define("N0", f"{self.pre_cut_chain['N0']}")
+                self.pre_cut_tree = self.pre_cut_tree.Define("N0", f"{self.pre_cut_chain['N0']}")
+
             
                 
     def set_cuts(self, cuts: List[CutFlow]):
@@ -476,7 +500,7 @@ class RDFStaff(Staff):
         else:
             print("set_cuts(): There is no RDF.")
 
-    def append_cuts(self, cuts: List[CutFlow]):
+    def append_cuts(self, cuts: CutFlow | List[CutFlow]):
         """
         Append a cut flow or a list of cut flows.
 
@@ -486,12 +510,10 @@ class RDFStaff(Staff):
             List of functions to apply as filters to the RDataFrame.
         """
         import copy
-        if isinstance(cuts, list):
-            new_cuts = self.cuts + copy.copy(cuts)
-        else:
-            new_cuts = self.cuts + [copy.copy(cuts)]
+        for key, staff in self.staff_dict.items():
+            head = self._normalize_classify(self.classify_dict.get(key, []))
+            staff.set_cuts(head + self.cuts)
         
-        self.set_cuts(new_cuts)
         
     def get_hist(self, func):
         """
@@ -582,7 +604,7 @@ class RDFFactory(Factory):
         tree_name (str): Name of the event TTree (default: "evt")
         pre_cut_tree_name (str): Name of the preselection cut TTree (default: "cut")
         cuts (List[str]): Additional event selection cuts
-        classify_dict (Dict[str, str]): Truth-level selections to divide samples
+        classify_dict (Dict[str, List[CutFlow]]): Truth-level selections to divide samples
         pre_cut_names (Optional[List[str]]): Names of preselection cuts
         range (Optional[Any]): Range restriction for testing
     """
@@ -595,7 +617,7 @@ class RDFFactory(Factory):
     tree_name: str = "evt"
     pre_cut_tree_name: str = "cut"
     cuts: List[str] = field(default_factory=list)
-    classify_dict: Dict[str, str] = field(default_factory=dict)
+    classify_dict: Dict[str, List[CutFlow]] = field(default_factory=dict)
     pre_cut_names: Optional[List[str]] = None
     range: Optional[Any] = None
     necessary_columns: List[str] = field(init=True, default_factory=list, repr=False) 
@@ -675,7 +697,7 @@ class RDFFactory(Factory):
         cuts: (list)
             A list of event selection cuts.
         """
-        self.cuts = cuts
+        self.cuts = list(cuts)
         
         init_cut = CutFlow(name = "Init", list_bystander={},
                            formular = "true", latex = r"\text{Init}")
@@ -683,20 +705,37 @@ class RDFFactory(Factory):
             self.cuts = [init_cut]
 
         for key, value in self.staff_dict.items():
-            value.set_cuts( self.classify_dict.get(key, []) + self.cuts)
+            head = self._normalize_classify(self.classify_dict.get(key, []))
+            value.set_cuts(head + self.cuts)
+            # value.set_cuts( self.classify_dict.get(key, []) + self.cuts)
 
-
-    def append_cuts(self, cuts: CutFlow | List[CutFlow]):
-        """
-        Append a cut (or a list of cuts) following the initial cut-list.
-        """
+    def _normalize_cuts(self, cuts) -> List[CutFlow]:
+        """Normalize analysis cuts to list[CutFlow]."""
+        if cuts is None:
+            return []
+        if isinstance(cuts, CutFlow):
+            return [cuts]
         if isinstance(cuts, list):
-            self.cuts += cuts
-        else:
-            self.cuts += [cuts]
+            return cuts
+        return []
 
-        for key, value in self.staff_dict.items():
-            value.append_cuts(cuts)
+    def append_cuts(self, cuts: CutFlow | List[CutFlow]) -> None:
+        """
+        Staff-local: append cuts to current cut list, then rebuild.
+        In factory-managed workflows, prefer RDFFactory.append_cuts().
+        """
+        import copy
+        if self.rdf is None:
+            return
+
+        if cuts is None:
+            tail = []
+        elif isinstance(cuts, list):
+            tail = [copy.copy(c) for c in cuts]
+        else:
+            tail = [copy.copy(cuts)]
+
+        self.set_cuts(list(self.cuts) + tail)
 
     def get_hist(self, func, log=True):
         """
@@ -748,41 +787,95 @@ class RDFFactory(Factory):
     
     
     def get_weights(self, virtual_xsec=None):
-        if virtual_xsec == None:
+        """
+        Weight definition:
+          w = L * xsec / N_effective
+
+        N_effective policy:
+          - If classify_dict defines truth-split for this sample, use the
+            post-classification count as N_effective.
+          - Otherwise fallback to N0.
+
+        This makes component normalization consistent when a single file is split
+        into truth-defined components with different xsec (e.g. BR-weighted).
+        """
+        if virtual_xsec is None:
             virtual_xsec = self.xsec_dict
 
         weights = {}
-        
-        for key in self.staff_dict.keys():
-            init_statistic = self.staff_dict[key].pre_cut_chain[list(self.staff_dict[key].pre_cut_chain.keys())[0]]
-            if init_statistic > 0:
-                weights[key] = self.luminosity * virtual_xsec[key] / init_statistic  
-            else:
-                weights[key] = 1
-        
+
+        for key, staff in self.staff_dict.items():
+            # fallback if staff is empty/uninitialized
+            if staff.empty():
+                weights[key] = 1.0
+                continue
+
+            denom = self._truth_count_after_classify(staff, key)
+
+            # additional fallback safety
+            if denom <= 0:
+                denom = staff.pre_cut_chain.get("N0", 0.0)
+            if denom <= 0:
+                denom = 1.0
+
+            weights[key] = float(self.luminosity) * float(virtual_xsec[key]) / float(denom)
+
         return weights
 
-    def get_cut_chain_table(self, weight = None):
+
+    def get_cut_chain_table(self, weight=None):
         """
         从每个 RDFStaff 中获得 Cut Chain 的 pandas.Series，归一化到 weight 之后生成pandas.DataFrame
+
+        行为说明：
+        - truth classification（classify_dict）不再逐个展开成普通 cut 列；
+        - 折叠为单列 "Truth classification"，紧跟在 N0 后面；
+        - 后续 analysis cuts 正常展开。
         """
         import pandas as pd
         if weight is None:
             weight = self.get_weights()
 
-        res = []
-        for rdf in self.staff_dict.values():
-            # print(rdf.name)
-            res.append(rdf.get_cut_chain_table() * weight[rdf.name])
-        res = pd.DataFrame(res)
-        res = res.fillna(0)
-        res.loc["Sum",:] = res.sum()
-        return res
-    
+        rows = []
+        for staff in self.staff_dict.values():
+            key = staff.name
+            cls_names = set(self._classify_names_for(key))
+
+            od = {}
+
+            # 1) pre-cut chain first (keeps N0 semantics intact: file-level initial)
+            for n, v in staff.pre_cut_chain.items():
+                od[n] = float(v)
+
+            # 2) collapsed truth classification column
+            if cls_names:
+                od["TruthClassification"] = self._truth_count_after_classify(staff, key)
+
+            # 3) append post cuts, excluding classify cuts
+            for c in getattr(staff, "cuts", []):
+                if c.name in cls_names:
+                    continue
+                od[c.name] = float(c.count_final.GetValue())
+                
+            rows.append(pd.Series(od, name="$" + key + "$") * weight.get(key, 1.0))
+
+        df = pd.DataFrame(rows).fillna(0.0)
+        df.loc["Sum", :] = df.sum()
+        return df
+
     def save(self, tree_name: str, path_dir: Dict[str, str], var: List[str]):
-        for key, val in self.staff_dict.items():
+        """
+        Save selected events and cutflow metadata.
+
+        Notes:
+          - Pass truth-classification effective count to staff.save so the persisted
+            cut tree contains "TruthClassification" consistent with weights/table.
+        """
+        for key, staff in self.staff_dict.items():
             print(f"Writing file: {path_dir[key]}")
-            val.save(tree_name, path_dir[key], var)
+            truth_n = self._truth_count_after_classify(staff, key)
+            staff.save(tree_name, path_dir[key], var, truth_classification_count=truth_n)
+
 
     def __deepcopy__(self, memo):
         cls = self.__class__
@@ -878,3 +971,83 @@ class RDFFactory(Factory):
         staff.set_cuts(head + self.cuts)
 
         return True
+
+
+    # =============================================================================
+    # CHANGELOG
+    # -----------------------------------------------------------------------------
+    # Date      : 2026-01-27 (Asia/Singapore)
+    # Author    : Coo
+    # Module    : RDFFactory
+    # Summary   : Treat truth classification as "pre-selection semantics" for
+    #             reporting and normalization.
+    #
+    # Motivation:
+    #   - classify_dict is used to split a shared ROOT file into mutually-exclusive
+    #     MC components using truth. It should NOT appear as regular analysis cut
+    #     steps in cutflow tables, and weights must be normalized by the post-
+    #     classification effective statistics.
+    #
+    # Changes:
+    #   1) Add helpers to resolve classify cut names and obtain post-classification
+    #      count (Count_final after the last classify CutFlow).
+    #   2) get_cut_chain_table(): collapse classify cut(s) into a single column
+    #      "Truth classification" right after N0.
+    #   3) get_weights(): use post-classification count as denominator by default.
+    #   4) save(): pass truth-classification count into RDFStaff.save so the cut tree
+    #      persisted on disk is consistent with the table/weights semantics.
+    #
+    # Compatibility:
+    #   - Does not change the execution graph (RDataFrame filtering order is the same).
+    #   - Only changes *reporting* and *normalization* semantics.
+    # =============================================================================
+
+    def _normalize_classify(self, cs) -> list:
+        """Normalize classify_dict entry to a list[CutFlow]."""
+        if cs is None:
+            return []
+        if isinstance(cs, CutFlow):
+            return [cs]
+        if isinstance(cs, list):
+            return cs
+        # fallback: unknown type
+        return []
+
+    def _classify_names_for(self, key: str) -> list[str]:
+        """Return list of CutFlow.name used for truth classification for this sample."""
+        cs = self._normalize_classify(self.classify_dict.get(key, []))
+        return [c.name for c in cs if hasattr(c, "name")]
+
+    def _truth_count_after_classify(self, staff: RDFStaff, key: str) -> float:
+        """
+        Count AFTER truth classification (i.e. after the last classify CutFlow).
+        If no classify defined / not found in staff.cuts, fallback to N0.
+
+        在分类后的真实计数（即在最后一个分类CutFlow之后）。
+        如果没有定义分类或在staff.cuts中找不到，则回退到N0计数。
+        
+        Args:
+            staff (RDFStaff): 包含RDF数据和切割信息的对象
+            key (str): 用于识别分类的名称键
+        
+        Returns:
+            float: 分类后的计数结果，如果找不到分类则返回N0或总计数
+        
+        Note:
+            如果找不到指定的分类名称，会尝试回退到预切割链中的N0计数，
+            如果N0也不存在，则返回RDF的总计数
+        """
+        cls_names = self._classify_names_for(key)
+        if not cls_names:
+            # fallback to N0 if available, else rdf.Count()
+            if getattr(staff, "pre_cut_chain", None) and "N0" in staff.pre_cut_chain:
+                return float(staff.pre_cut_chain["N0"])
+            return float(staff.rdf.Count().GetValue())
+
+        idxs = [i for i, c in enumerate(getattr(staff, "cuts", [])) if c.name in cls_names]
+        if not idxs:
+            if getattr(staff, "pre_cut_chain", None) and "N0" in staff.pre_cut_chain:
+                return float(staff.pre_cut_chain["N0"])
+            return float(staff.rdf.Count().GetValue())
+
+        return float(staff.cuts[max(idxs)].count_final.GetValue())
