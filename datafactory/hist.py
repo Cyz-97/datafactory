@@ -604,7 +604,8 @@ class HistFactory(Factory):
                  ylim: Optional[Tuple[float, float]] = None,
                  sharey: bool = True,
                  cols: int = 3,
-                 figsize: Tuple[float, float] = (4,3)):
+                 figsize: Tuple[float, float] = (4,3),
+                 legend_font_size: float | str = 'small'):
         """
         将所有 HistStaff 分面绘制（每个 staff 一个子图），共享坐标轴，子图间距为 0。
         不做任何 Data/MC 对比。
@@ -653,7 +654,8 @@ class HistFactory(Factory):
         rows = int(np.ceil(n / cols))
 
         fig, axes = plt.subplots(rows, cols, figsize=figsize, 
-                                 sharex=True, sharey=sharey)
+                                 sharex=True, sharey=sharey,
+                                 gridspec_kw={'hspace': 0.3})
         if isinstance(axes, np.ndarray):
             axes = axes.reshape(rows, cols)
         else:
@@ -676,7 +678,7 @@ class HistFactory(Factory):
             ax.stairs(y_show, edges, color = 'k')
             # 右上角标注 staff 名称
             ax.text(0.97, 0.97, f"${name}$", transform=ax.transAxes,
-                    ha="right", va="top", fontsize="xx-small")
+                    ha="right", va="top", fontsize=legend_font_size)
 
         # # 统一坐标设置与刻度防重叠策略
         # for r in range(rows):
