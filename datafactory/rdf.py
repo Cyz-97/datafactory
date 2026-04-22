@@ -584,10 +584,12 @@ class RDFStaff(Staff):
     def define(self, branch_name: str, func_str: str):
         if branch_name in self.rdf.GetColumnNames():
             self.rdf = self.rdf.Redefine(branch_name, func_str)
-            # self.cuts[-1].sample_final = self.cuts[-1].sample_final.Redefine(branch_name, func_str)
+            if (len(self.cuts) > 0):
+                self.cuts[-1].sample_final = self.cuts[-1].sample_final.Redefine(branch_name, func_str)
         else: 
             self.rdf = self.rdf.Define(branch_name, func_str)
-            # self.cuts[-1].sample_final = self.cuts[-1].sample_final.Define(branch_name, func_str)
+            if (len(self.cuts) > 0):
+                self.cuts[-1].sample_final = self.cuts[-1].sample_final.Define(branch_name, func_str)
             # self._column_names = self.rdf.GetColumnNames()
     
     

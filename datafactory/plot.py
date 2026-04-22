@@ -674,7 +674,7 @@ def compare_hist1d_multi2one(hist_a_list: list, hist_b, xlabel: str, **kargs):
         return ax1, ax2
 
 
-def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
+def compare_mc_data(stack_mc, data, xlabel, get_color = None, **kargs):
     """
     绘制蒙特卡洛数据与实际数据的对比图。
 
@@ -691,7 +691,7 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
         ylabel (str): y 轴标签。
         file_title (str): 文件标题。
     返回:
-        None
+        ax1, ax2: 主图（MC、data对比图）和副图（Residual）
     """
     import numpy as np
     import matplotlib.pyplot as plt
@@ -735,6 +735,10 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     legend_font_size = kargs.get("legend_font_size", 5)
     # legend列数
     legend_ncol = kargs.get("legend_ncol", 4)
+
+    if get_color is None:
+        colors = {key: f"C{i}" for i, key in enumerate(stack_mc.staff_dict.keys())}
+        get_color = lambda x: colors[x]
 
     stack_mc._get_value()
     data._get_value(data)
@@ -790,19 +794,20 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     # 初始化基线误差数组
     baseline_err = np.zeros_like(x_data)
     # 遍历蒙特卡洛数据字典
-    # print(mc_order)
     for component_type in mc_order:
+        print(component_type)
         for i in x_mc_col.keys():
             # 绘制柱状图
             if stack_mc.staff_dict[i].type == component_type:
                 if (stack):
+                    print(get_color(i))
                     ax1.bar(x_edge_mc[:-1], y_mc_col[i], width=x_width_mc_col[i], bottom=baseline,
-                            label="$"+i+"$", lw=0, alpha=0.8, color="#"+get_color(i),
+                            label="$"+i+"$", lw=0, alpha=0.8, color=get_color(i),
                             edgecolor='white', align='edge',
                             hatch="/////\\\\\\\\\\" if i == highlight_channel else "")
                 else:
                     ax1.stairs(y_mc_col[i], np.hstack([x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2]),
-                               label="$"+i+"$", lw=0.6, alpha=1, color="#"+get_color(i))
+                               label="$"+i+"$", lw=0.6, alpha=1, color=get_color(i))
                 # 累加基线
                 baseline += y_mc_col[i]
                 # 累加基线误差
@@ -1338,3 +1343,77 @@ def plot_2d_slides(hist: HistFactory, slice_axis, slice_num,
                 hist.histogram, slice_axis, slice_num)
         }
         return plot_projections(groups, slice_axis_name, xlabel, normalize_to=normalize_to, **kwargs)
+
+def add_particle_mass_ticks(ax, particle_names, squared=False, axis_position='top', unit='GeV', ticks_param = {}):
+    """
+    Add particle mass (or mass squared) ticks to a matplotlib axis using known particle masses.
+
+    Parameters:
+    ----------
+    ax : matplotlib.axes.Axes
+        The axis to which the particle mass ticks will be added.
+    particle_names : list of str
+        List of particle names recognized by the `particle` package (e.g., 'pi0', 'eta', 'f(0)(980)').
+    squared : bool, optional
+        If True, place ticks at mass squared values. Otherwise, at mass values. Default is False.
+    axis_position : {'bottom', 'top'}, optional
+        Position for the new axis. Default is 'bottom'.
+    unit : str, optional
+        Unit of the axis for display ('GeV', 'MeV', etc.). Currently used only for label display. Default is 'GeV'.
+
+    Returns:
+    -------
+    secax : matplotlib.axis.Axis
+        The secondary x-axis with particle mass ticks.
+
+    Example:
+    -------
+    >>> import matplotlib.pyplot as plt
+    >>> fig, ax = plt.subplots()
+    >>> ax.plot([0.1, 1.2], [1, 2])
+    >>> add_particle_mass_ticks(ax, ['pi0', 'eta', 'f(0)(980)'], squared=False)
+    >>> plt.show()
+
+    Notes:
+    -----
+    - The function uses the `Particle.from_name()` method to resolve particle masses.
+    - Masses are automatically converted to GeV.
+    - If `squared=True`, the tick positions will be set at m² [GeV²].
+    - If a particle is not found, a warning will be printed and it will be skipped.
+    """
+    
+    from matplotlib.ticker import FixedLocator, FixedFormatter
+    from particle import Particle
+
+    # Get particle masses
+    masses = []
+    labels = []
+    for name in particle_names:
+        try:
+            p = Particle.from_name(name)
+            mass_GeV = p.mass / 1e3  # convert MeV to GeV
+            val = mass_GeV**2 if squared else mass_GeV
+            masses.append(val)
+            labels.append(f"${p.latex_name}$")
+        except Exception as e:
+            print(f"Warning: Could not find particle '{name}': {e}")
+
+    # Set ticks on the chosen axis
+    twin_ax = ax.twiny() if axis_position == 'top' else ax.twiny()
+    # print(ax.get_xlim())
+    twin_ax.set_xticks(masses)
+    twin_ax.set_xticklabels(labels, **ticks_param)
+    twin_ax.minorticks_off()
+    twin_ax.tick_params(axis='x', direction='out', length=3)
+
+    if axis_position == 'bottom':
+        twin_ax.xaxis.set_ticks_position('bottom')
+        twin_ax.xaxis.set_label_position('bottom')
+        twin_ax.spines['bottom'].set_position(('outward', 0))
+    else:
+        twin_ax.xaxis.set_ticks_position('top')
+        twin_ax.xaxis.set_label_position('top')
+    
+    twin_ax.set(xlim = ax.get_xlim())
+
+    return twin_ax
