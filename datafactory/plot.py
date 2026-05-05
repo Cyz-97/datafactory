@@ -632,7 +632,7 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     # 设置图例标题
     legend_title = kargs.get("legend_title", None)
     # 设置成分高亮
-    highlight_channel = kargs.get("highlight_channel", None)
+    highlight_channel = kargs.get("highlight_channel", [])
     # 设置图片大小
     figsize = kargs.get("figsize", (4,4))
     # 是否在 pull plot 里放 chi2
@@ -704,8 +704,9 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
                 if (stack):
                     ax1.bar(x_edge_mc[:-1], y_mc_col[i], width = x_width_mc_col[i], bottom = baseline,
                             label = "$"+i+"$", lw = 0, alpha = 0.8, color = "#"+get_color(i),
-                            edgecolor='white', align='edge',
-                            hatch = "/////\\\\\\\\\\" if i == highlight_channel else "")
+                            edgecolor='w', align='edge',
+                            hatch = "xxx" if (i in highlight_channel) else "",
+                            hatch_linewidth = 0.4)
                 else:
                     ax1.stairs(y_mc_col[i],np.hstack([ x_mc_col[i][0] - x_width_mc_col[i][0]/2, x_mc_col[i] + x_width_mc_col[i]/2 ]), 
                             label = "$"+i+"$", lw = 0.6, alpha = 1, color = "#"+get_color(i))
@@ -717,9 +718,9 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     # 求和后基线表示总 MC histogram
     ax1.bar(x_mc, 2*baseline_err, width = x_width_mc, 
             bottom = baseline - baseline_err, 
-            hatch = "//////////", hatch_linewidth = 0.6, 
+            hatch = "//////////", hatch_linewidth = 0.9, 
             fill = False, lw = 0, ls = "", 
-            facecolor = "gray", alpha = 0.6, label = r"$\text{MC error}$")
+            facecolor = "k", alpha = 0.6, label = r"$\text{MC error}$")
     # 绘制实际数据的误差棒图
     ax1.errorbar(x_data, y_data_norm, xerr = 0, yerr = yerr_data_norm,
             marker = "o", ms = 1.5, color = "black", label = r"$\text{Data}$", ls = "", lw = 0.4)
@@ -752,7 +753,7 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
         ymax = np.max(y_data_norm)*200
     elif ylim == None:
         ymin = 0
-        ymax = np.max(y_data_norm)*2
+        ymax = np.max(y_data_norm)*1.6
     else:
         ymin, ymax = ylim
     ax1.set(ylabel = ylabel, 
@@ -761,7 +762,7 @@ def compare_mc_data(stack_mc, data, get_color, xlabel, **kargs):
     
     # 添加图例
     legend = ax1.legend(title = legend_title,
-               loc = "best", ncol=4, handlelength=1.5, fontsize = 5, columnspacing = 0.5)
+               loc = "best", ncol=4, handlelength=1.5, fontsize = 6, columnspacing = 0.5)
     
     # 设置图例标题颜色
     if highlight_channel:
