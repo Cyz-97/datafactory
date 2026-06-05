@@ -1,6 +1,6 @@
 import os, glob
 from .core import Staff, StaffType, Factory
-from .hist import HistFactory, HistStaff
+from .hist import HistFactory, HistStaff, UnbinnedFactory, UnbinnedStaff
 from dataclasses import dataclass, field
 import dataclasses as dc
 from typing import Optional, List, Dict, Any, Tuple
@@ -548,6 +548,31 @@ class RDFStaff(Staff):
 
         return HistStaff(name = self.name, histogram=hist, type = self.type)
 
+    def get_unbinned(self, func) -> UnbinnedStaff:
+        """
+        从当前 cut 末端的 RNode 拉取事例级数组，返回 ``UnbinnedStaff``。
+
+        Parameters
+        ----------
+        func : Callable[[RNode], dict[str, np.ndarray]]
+            用户负责对 RNode 调用 ``AsNumpy(...)`` 并返回 dict。
+            必须包含键 ``"data_x"``；可选键 ``"data_y"``（2D）和 ``"weights"``。
+            如果列是 RVec，需要在 ``func`` 内自行 flatten/Take。
+        """
+        node = self.cuts[-1].sample_final if len(self.cuts) > 0 else self.rdf
+        arr = func(node)
+        if "data_x" not in arr:
+            raise ValueError(
+                "RDFStaff.get_unbinned: func must return a dict containing 'data_x'."
+            )
+        return UnbinnedStaff(
+            name=self.name,
+            type=self.type,
+            data_x=arr["data_x"],
+            data_y=arr.get("data_y"),
+            weights=arr.get("weights"),
+        )
+
     def get_cut_chain_table(self):
         """
         获取cut chain统计表
@@ -786,7 +811,21 @@ class RDFFactory(Factory):
 
         res = HistFactory(staff_dict=hists_dict, type_dict=self.type_dict)
         return res
-    
+
+    def get_unbinned(self, func) -> UnbinnedFactory:
+        """
+        对每个非空 staff 调用 ``func`` 拉取事例级数组，返回 ``UnbinnedFactory``。
+
+        ``func`` 的契约与 ``RDFStaff.get_unbinned`` 一致。
+        """
+        self.set_cuts(self.cuts)
+        out: Dict[str, UnbinnedStaff] = {}
+        for key, staff in self.staff_dict.items():
+            if staff.empty():
+                continue
+            out[key] = staff.get_unbinned(func)
+        return UnbinnedFactory(staff_dict=out, type_dict=self.type_dict)
+
     
     def get_weights(self, virtual_xsec=None):
         """

@@ -409,6 +409,231 @@ class HistStaff(Staff):
 
 
 @dataclass
+class UnbinnedStaff(Staff):
+    """事例级（unbinned）样本。仅在内存中保存数组与权重，可在需要时通过
+    ``get_hist(bins)`` 转成 ``HistStaff`` 供下游绘图/统计使用。"""
+
+    name: str
+    type: StaffType = StaffType.other
+    data_x: np.ndarray = field(default=None)
+    data_y: Optional[np.ndarray] = field(default=None)
+    weights: Optional[np.ndarray] = field(default=None, repr=False)
+
+    dimension: int = field(default=1, init=False, repr=False)
+
+    def __post_init__(self):
+        self.load()
+
+    def load(self):
+        if self.data_x is None:
+            raise ValueError("UnbinnedStaff: data_x is required.")
+
+        self.data_x = np.asarray(self.data_x, dtype=float).ravel()
+
+        if self.data_y is not None:
+            self.data_y = np.asarray(self.data_y, dtype=float).ravel()
+            if self.data_y.shape != self.data_x.shape:
+                raise ValueError(
+                    f"UnbinnedStaff: data_y shape {self.data_y.shape} "
+                    f"!= data_x shape {self.data_x.shape}"
+                )
+            self.dimension = 2
+        else:
+            self.dimension = 1
+
+        if self.weights is not None:
+            self.weights = np.asarray(self.weights, dtype=float).ravel()
+            if self.weights.shape != self.data_x.shape:
+                raise ValueError(
+                    f"UnbinnedStaff: weights shape {self.weights.shape} "
+                    f"!= data_x shape {self.data_x.shape}"
+                )
+
+    def save(self, path: str):
+        raise NotImplementedError(
+            "UnbinnedStaff.save: persistence is not supported in v1."
+        )
+
+    def _effective_weights(self) -> np.ndarray:
+        if self.weights is not None:
+            return self.weights
+        return np.ones_like(self.data_x)
+
+    @staticmethod
+    def _resolve_edges(b) -> np.ndarray:
+        if isinstance(b, np.ndarray):
+            return b.astype(float)
+        if isinstance(b, tuple) and len(b) == 3:
+            nbins, lo, hi = b
+            return np.linspace(float(lo), float(hi), int(nbins) + 1)
+        if isinstance(b, (list, tuple)):
+            return np.asarray(b, dtype=float)
+        raise ValueError(
+            f"UnbinnedStaff: cannot interpret bins specification {b!r}."
+        )
+
+    def get_arrays(self) -> Tuple[np.ndarray, ...]:
+        w = self._effective_weights()
+        if self.dimension == 1:
+            return (self.data_x, w)
+        return (self.data_x, self.data_y, w)
+
+    def get_hist(self, bins) -> "HistStaff":
+        import hist as hist_mod
+
+        w = self._effective_weights()
+
+        if self.dimension == 1:
+            edges = self._resolve_edges(bins)
+            h = hist_mod.Hist(
+                hist_mod.axis.Variable(edges, name=self.name),
+                storage=hist_mod.storage.Weight(),
+            )
+            h.fill(self.data_x, weight=w)
+            view = h.view()
+            content = np.asarray(view["value"], dtype=float)
+            err = np.sqrt(np.asarray(view["variance"], dtype=float))
+            th1 = Numpy2TH1(edges, content, err, name=self.name)
+            return HistStaff(name=self.name, histogram=th1, type=self.type)
+
+        if self.dimension == 2:
+            if not (isinstance(bins, tuple) and len(bins) == 2):
+                raise ValueError(
+                    "UnbinnedStaff.get_hist: 2D bins must be a tuple "
+                    "(bins_x, bins_y)."
+                )
+            bx, by = bins
+            xedges = self._resolve_edges(bx)
+            yedges = self._resolve_edges(by)
+            h = hist_mod.Hist(
+                hist_mod.axis.Variable(xedges, name=self.name + "_x"),
+                hist_mod.axis.Variable(yedges, name=self.name + "_y"),
+                storage=hist_mod.storage.Weight(),
+            )
+            h.fill(self.data_x, self.data_y, weight=w)
+            view = h.view()
+            content_xy = np.asarray(view["value"], dtype=float)
+            err_xy = np.sqrt(np.asarray(view["variance"], dtype=float))
+            # Numpy2TH2 expects (Ny, Nx); hist.Hist view is (Nx, Ny)
+            th2 = Numpy2TH2(
+                xedges, yedges, content_xy.T, err_xy.T, name=self.name
+            )
+            return HistStaff(name=self.name, histogram=th2, type=self.type)
+
+        raise NotImplementedError(
+            f"UnbinnedStaff.get_hist: dimension {self.dimension} not supported."
+        )
+
+    def get_numpy(self, bins=None):
+        if bins is None:
+            raise ValueError(
+                "UnbinnedStaff.get_numpy requires a `bins` argument."
+            )
+        return self.get_hist(bins).get_numpy()
+
+    def __add__(self, other: Self) -> Self:
+        if not isinstance(other, UnbinnedStaff):
+            raise TypeError(
+                "UnbinnedStaff.__add__: other must be an UnbinnedStaff."
+            )
+        if self.dimension != other.dimension:
+            raise ValueError("UnbinnedStaff.__add__: dimension mismatch.")
+
+        new_x = np.concatenate([self.data_x, other.data_x])
+        new_y = (
+            np.concatenate([self.data_y, other.data_y])
+            if self.dimension == 2
+            else None
+        )
+        new_w = np.concatenate(
+            [self._effective_weights(), other._effective_weights()]
+        )
+        return UnbinnedStaff(
+            name=self.name,
+            type=self.type,
+            data_x=new_x,
+            data_y=new_y,
+            weights=new_w,
+        )
+
+    def __mul__(self, other) -> Self:
+        if not isinstance(other, Number):
+            raise TypeError(
+                "UnbinnedStaff.__mul__: only scalar multiplication is supported."
+            )
+        res = copy(self)
+        res.weights = res._effective_weights() * float(other)
+        return res
+
+    def __sub__(self, other):
+        raise NotImplementedError(
+            "UnbinnedStaff.__sub__: subtraction is undefined on unbinned data."
+        )
+
+    def __truediv__(self, other):
+        if isinstance(other, Number):
+            return self.__mul__(1.0 / float(other))
+        raise NotImplementedError(
+            "UnbinnedStaff.__truediv__: only scalar division is supported."
+        )
+
+    def __copy__(self) -> Self:
+        return UnbinnedStaff(
+            name=self.name,
+            type=self.type,
+            data_x=self.data_x.copy(),
+            data_y=None if self.data_y is None else self.data_y.copy(),
+            weights=None if self.weights is None else self.weights.copy(),
+        )
+
+    def __deepcopy__(self, memo) -> Self:
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        return UnbinnedStaff(
+            name=self.name,
+            type=self.type,
+            data_x=self.data_x.copy(),
+            data_y=None if self.data_y is None else self.data_y.copy(),
+            weights=None if self.weights is None else self.weights.copy(),
+        )
+
+    def concatenate(self, other: Self) -> Self:
+        return self.__add__(other)
+
+    def norm_to(self, count: float):
+        w = self._effective_weights()
+        total = float(w.sum())
+        if total != 0:
+            self.weights = w * (float(count) / total)
+
+    def plot(self, xlabel, ax=None, bins=50, hist_args=None):
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            ax = plt.figure().subplots(1)
+        if hist_args is None:
+            hist_args = {}
+
+        w = self._effective_weights()
+        if self.dimension == 1:
+            ax.hist(
+                self.data_x,
+                bins=bins,
+                weights=w,
+                label="$" + self.name + "$",
+                histtype="step",
+                **hist_args,
+            )
+        elif self.dimension == 2:
+            h = ax.hist2d(
+                self.data_x, self.data_y, bins=bins, weights=w, **hist_args
+            )
+            plt.colorbar(h[3], ax=ax)
+        ax.set(xlabel=xlabel)
+        return ax
+
+
+@dataclass
 class HistFactory(Factory):
     staff_dict: Dict[str, HistStaff] = field(default=None, repr=True)
     path_dict: Dict[str, str] = field(default=None, repr=False)
@@ -721,3 +946,62 @@ class HistFactory(Factory):
         fig.supylabel(ylabel)
 
         return fig, axes
+
+
+@dataclass
+class UnbinnedFactory(Factory):
+    """与 ``HistFactory`` 平行：批量管理 ``UnbinnedStaff``，并提供
+    ``get_histfactory(bins)`` 把全部 staff 统一 binning 为 ``HistFactory``。"""
+
+    staff_dict: Dict[str, UnbinnedStaff] = field(default=None, repr=True)
+    type_dict: Dict[str, StaffType] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self):
+        self.load()
+
+    def load(self):
+        if self.staff_dict is None:
+            self.staff_dict = {}
+        else:
+            for name, staff in self.staff_dict.items():
+                self.type_dict.setdefault(name, staff.type)
+
+    def save(self, path: str):
+        raise NotImplementedError(
+            "UnbinnedFactory.save: persistence is not supported in v1."
+        )
+
+    def get_arrays(self) -> Dict[str, Tuple[np.ndarray, ...]]:
+        return {name: s.get_arrays() for name, s in self.staff_dict.items()}
+
+    def get_histfactory(self, bins) -> HistFactory:
+        hists_dict = {
+            name: s.get_hist(bins) for name, s in self.staff_dict.items()
+        }
+        return HistFactory(
+            staff_dict=hists_dict, type_dict=deepcopy(self.type_dict)
+        )
+
+    def append(self, staff: UnbinnedStaff):
+        self.staff_dict[staff.name] = copy(staff)
+        self.type_dict[staff.name] = staff.type
+
+    def pop(self, name: str):
+        if name in self.staff_dict:
+            self.staff_dict.pop(name)
+        if name in self.type_dict:
+            self.type_dict.pop(name)
+
+    def __copy__(self):
+        return UnbinnedFactory(
+            staff_dict={k: copy(v) for k, v in self.staff_dict.items()},
+            type_dict=deepcopy(self.type_dict),
+        )
+
+    def __deepcopy__(self, memo):
+        new = type(self).__new__(type(self))
+        memo[id(self)] = new
+        return UnbinnedFactory(
+            staff_dict={k: deepcopy(v, memo) for k, v in self.staff_dict.items()},
+            type_dict=deepcopy(self.type_dict),
+        )
