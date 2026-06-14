@@ -1,7 +1,9 @@
 from .core import Staff, StaffType, Factory
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Self
+
 from copy import copy, deepcopy
+
 from numbers import Number
 import os
 
@@ -672,7 +674,11 @@ class HistFactory(Factory):
     def load(self):
         if self.staff_dict is not None:
             # print(self.staff_dict)
-            pass
+            for key, staff in self.staff_dict.items():
+                self.staff_dict[key] = deepcopy(self.staff_dict[key])
+                self.staff_dict[key].name = key
+                self.staff_dict[key].type = self.type_dict.get(key, StaffType.other)
+                
         elif self.path_dict is not None:
             self.staff_dict = {}
             for name, path in self.path_dict.items():
@@ -682,7 +688,7 @@ class HistFactory(Factory):
 
                 temp = HistStaff(name=name,
                                  path=path,
-                                 type=self.type_dict.get(name, StaffType.background))
+                                 type=self.type_dict.get(name, StaffType.other))
                 if temp.histogram is not None:
                     self.staff_dict[name] = temp
                 else:

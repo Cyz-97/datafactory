@@ -840,9 +840,10 @@ def compare_mc_data(stack_mc, data, xlabel, get_color = None, **kargs):
                    label="Mix MC", lw=0.6, alpha=1, color="black")
 
     # 在图中添加 DataInfo 信息
-    ax1.text(1, 1.02, "$" + str(datainfo) + "$",
-             fontsize="x-small", horizontalalignment='right',
-             transform=ax1.transAxes)
+    if datainfo is not None:
+        ax1.text(1, 1.02, "$" + str(datainfo) + "$",
+                fontsize="x-small", horizontalalignment='right',
+                transform=ax1.transAxes)
 
     # 设置 y 轴标签和范围
     ymin, ymax = None, None
