@@ -43,6 +43,62 @@ def bayes_divide(y_pass, y_tot):
     upper_error[eff == 1] = 0
     return eff, lower_error, upper_error
 
+def baker_cousins_chi2(observed, expected, n_params):
+    """
+    Computes the Baker–Cousins chi-squared goodness-of-fit statistic for
+    binned Poisson data.
+
+    Baker–Cousins χ² is defined as:
+
+        χ²_BC = 2 Σᵢ [ nᵢ ln(nᵢ / μᵢ) + μᵢ − nᵢ ]
+
+    where nᵢ and μᵢ are the observed and expected (model) counts in bin i.
+    For bins with nᵢ = 0 the nᵢ ln(nᵢ/μᵢ) term vanishes, leaving a
+    contribution of μᵢ.
+
+    This statistic equals 2 × Poisson NLL plus the constant Σ nᵢ ln(nᵢ),
+    so χ²_BC − χ²_BC(best) is exactly the likelihood-ratio test statistic
+    used in MINUIT / zfit.  It has the same asymptotic χ²(ndf) distribution
+    as Pearson χ² but is more accurate in low-count bins where the Poisson
+    distribution is noticeably non-Gaussian.
+
+    The number of degrees of freedom is ndf = N_valid_bins − n_params, and
+    the reduced chi² is χ² / ndf (or NaN when ndf ≤ 0).
+
+    Args:
+        observed (array-like): Observed bin counts (e.g. integer histogram
+            entries).  Shape ``(N_bins,)``.
+        expected (array-like): Expected bin counts from the fitted model.
+            Same shape as ``observed``.  Must be > 0 in every bin used.
+        n_params (int): Number of free parameters in the fit (e.g. 3 for
+            nsig, nbkg, and a slope parameter).
+
+    Returns:
+        dict: A dictionary with keys:
+            - ``chi2`` (float):      Baker–Cousins χ² value.
+            - ``ndf`` (int):         Number of degrees of freedom.
+            - ``reduced_chi2`` (float): χ² / ndf, or ``float('nan')`` if
+              ndf ≤ 0.
+    """
+    import numpy as np
+
+    obs = np.asarray(observed, dtype=float)
+    exp = np.asarray(expected, dtype=float)
+
+    # Only include bins where the model predicts a positive count
+    valid = exp > 0
+    obs_v = obs[valid]
+    exp_v = exp[valid]
+
+    # Baker–Cousins: 2 * Σ [n ln(n/μ) + μ − n]
+    # For n = 0: n ln(n/μ) → 0, contribution = μ
+    ratio = np.where(obs_v > 0, obs_v * np.log(obs_v / exp_v), 0.0)
+    chi2 = 2.0 * np.sum(ratio + exp_v - obs_v)
+    ndf = len(obs_v) - n_params
+    reduced_chi2 = chi2 / ndf if ndf > 0 else float("nan")
+
+    return {"chi2": float(chi2), "ndf": int(ndf), "reduced_chi2": float(reduced_chi2)}
+
 def fuck_roofit_param(fit_result):
     final_params = fit_result.floatParsFinal()
     # 在pyROOT中，通常使用迭代器来遍历RooArgList
