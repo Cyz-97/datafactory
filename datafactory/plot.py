@@ -1175,9 +1175,16 @@ def compare_mc_data2d(stack_mc, data, weights=None, **kargs):
     for ax in axs_components:
         ax.label_outer()
 
-    # colorbar attached to right panels (fallback to left if no right panels)
-    cbar_ax_list = axs_components if axs_components else [ax_mc]
-    cbar = fig.colorbar(pcm_mc, ax=cbar_ax_list, location="right", pad=0.02)
+    # Shared colorbar for the full 2D layout.  All panels use the same
+    # normalization object, so a single bar represents Data, mixed MC, and every
+    # visible MC component without exposing layout micro-knobs in the public API.
+    cbar_axes = [ax_data, ax_mc] + axs_components
+    boxes = [ax.get_position() for ax in cbar_axes]
+    cbar_x0 = max(box.x1 for box in boxes) + 0.012
+    cbar_y0 = min(box.y0 for box in boxes)
+    cbar_y1 = max(box.y1 for box in boxes)
+    cbar_ax = fig.add_axes([cbar_x0, cbar_y0, 0.016, cbar_y1 - cbar_y0])
+    cbar = fig.colorbar(pcm_mc, cax=cbar_ax)
     cbar.set_label(
         r"$\text{Counts}$" if not norm_by_width else r"$\text{Counts}/(\Delta x \Delta y)$")
 
