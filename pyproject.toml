@@ -23,6 +23,15 @@ dependencies = [
     "scipy>=1.16.0",
 ]
 
+[project.optional-dependencies]
+sideband = [
+    "pysr>=1.5,<1.6",
+    "symbolfit>=0.2.5,<0.3",
+    "sympy>=1.14,<1.15",
+    "tensorflow>=2.18,<2.19",
+    "zfit>=0.28,<0.29",
+]
+
 [project.urls]
 Homepage = "https://github.com/Cyz-97/datafactory"
 Issues = "https://github.com/Cyz-97/datafactory/issues"
