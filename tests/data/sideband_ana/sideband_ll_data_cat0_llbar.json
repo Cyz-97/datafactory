@@ -37,6 +37,25 @@
     "ndf": 153,
     "background_formula": "12615500.0*(13.0457622375 - 10.5615*x0)**2*(10.5615*x0 - 12.5465822375)**2*(10.5615*x0 - 11.4536207375) + 11049424.4455"
   },
+  "reference_results": {
+    "meaning": "Values persisted by 09_pair_jet_distribution_summary.py for the same source product. The 1-D value uses all-event LL data; the 2-D values use the per-category cat0/llbar four-period fit.",
+    "one_dimensional": {
+      "r": 1.2738716565513393,
+      "sigma_r": 0.006039416939945338
+    },
+    "two_dimensional": {
+      "w_H": 1.3387860314937274,
+      "w_V": 1.3387860314937274,
+      "w_C": -1.7923480381227237,
+      "weight_covariance": [
+        [0.00007397472290818669, 0.00007397472290818669, -0.00019807265143619428],
+        [0.00007397472290818669, 0.00007397472290818669, -0.00019807265143619428],
+        [-0.00019807265143619428, -0.00019807265143619428, 0.0005303537979541694]
+      ],
+      "fit_periods": 4,
+      "fixture_fit_periods": 1
+    }
+  },
   "regions": {
     "order": [
       "SS",
