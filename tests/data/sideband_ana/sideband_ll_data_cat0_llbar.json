@@ -1,0 +1,216 @@
+{
+  "schema_version": "sideband_ana_fixture_v1",
+  "fixture_file": "sideband_ll_data_cat0_llbar.npz",
+  "sample": "data",
+  "years": [
+    "1992",
+    "1993",
+    "1994",
+    "1995"
+  ],
+  "year_merge_weights": {
+    "1992": 1.0,
+    "1993": 1.0,
+    "1994": 1.0,
+    "1995": 1.0
+  },
+  "category": "all_event",
+  "category_index": 0,
+  "subset": "llbar",
+  "channel": "lambda_lambdabar",
+  "channel_index": 1,
+  "selection": "tight",
+  "tree": "Events",
+  "observable": "delta_phi_thrust",
+  "observable_units": "radians",
+  "delta_phi_definition": "acos of the two momenta projected onto the plane perpendicular to the category thrust axis: the unit Btag_thrustVector for all_event, the shared jet's thrust axis for same_jet/leading_two/third_jet; range [0, pi]; invalid sentinel (-1) drops only the affected category slot",
+  "mass_units": "GeV",
+  "mass_fit": {
+    "source_object": "mass_fit_ll_data",
+    "range_gev": [
+      1.08,
+      1.175
+    ],
+    "peak_mean_gev": 1.1162307456725606,
+    "peak_mean_error_gev": 7.631869506618524e-06,
+    "chi2": 293.3466664032731,
+    "ndf": 153,
+    "background_formula": "12615500.0*(13.0457622375 - 10.5615*x0)**2*(10.5615*x0 - 12.5465822375)**2*(10.5615*x0 - 11.4536207375) + 11049424.4455"
+  },
+  "regions": {
+    "order": [
+      "SS",
+      "BS",
+      "SB",
+      "BB"
+    ],
+    "source_reg_indices": {
+      "SS": 0,
+      "BS": 1,
+      "SB": 2,
+      "BB": 3
+    },
+    "orientation": "09 uses the upper sideband only on each Lambda-mass endpoint; B is that upper sideband, not a low+high union.",
+    "atomic_mapping": {
+      "SS": [
+        "S",
+        "S"
+      ],
+      "BS": [
+        "B",
+        "S"
+      ],
+      "SB": [
+        "S",
+        "B"
+      ],
+      "BB": [
+        "B",
+        "B"
+      ]
+    },
+    "source_objects": {
+      "SS": {
+        "mass": "regional_ll_data_ch1_cat0_reg0_mass_5gev",
+        "delta_phi_thrust": "regional_ll_data_ch1_cat0_reg0_delta_phi_thrust"
+      },
+      "BS": {
+        "mass": "regional_ll_data_ch1_cat0_reg1_mass_5gev",
+        "delta_phi_thrust": "regional_ll_data_ch1_cat0_reg1_delta_phi_thrust"
+      },
+      "SB": {
+        "mass": "regional_ll_data_ch1_cat0_reg2_mass_5gev",
+        "delta_phi_thrust": "regional_ll_data_ch1_cat0_reg2_delta_phi_thrust"
+      },
+      "BB": {
+        "mass": "regional_ll_data_ch1_cat0_reg3_mass_5gev",
+        "delta_phi_thrust": "regional_ll_data_ch1_cat0_reg3_delta_phi_thrust"
+      }
+    },
+    "aggregation": "The fixture uses one atomic LL channel (ch1=Lambda-Lambdabar), so there is no channel aggregation; each axis-0 row is copied from one existing 09 two-endpoint region object.",
+    "definition": "region = rx + 2*ry on the two swapped Lambda-mass endpoints; rx/ry: 0 signal |m-mean|<window, 1 upper sideband |m-(mean+offset)|<window. reg0=SS, reg1=BS(m1 sideband,m2 signal,horizontal), reg2=SB(m1 signal,m2 sideband,vertical), reg3=BB",
+    "signal_window_gev": 0.01,
+    "sideband_offset_gev": 0.0443,
+    "peak_mean_gev": 1.1162307456725606
+  },
+  "cut_chain": [
+    "Event_hadronTagT4 == true",
+    "RecLambda_mass in [1.08, 1.175) GeV",
+    "tight: mapped |V0_tag| != 0",
+    "LL pair: no shared daughter Part index between the two Lambda candidates",
+    "LL endpoint swap: deterministic hash(rdfentry_, i, j, seed=20260803) 50/50",
+    "LP proton: Part_lock==0 && Haidc_protonTag>=2 && |charge|==1 && p>0.1 GeV && |Trac_length|>30 cm && not a Lambda daughter",
+    "proton energy recomputed with PDG mass 0.93827208816 GeV",
+    "Lambda jet: nearest cached Jet_p4 by Durham y = 2 min(E_L^2, E_j^2)(1-cos)/s, sqrt(s)=91.25 GeV, accept y < 0.005",
+    "proton jet: exact Part-index membership in exactly one Jet_particle_indices entry",
+    "signal window |m-mean| < 0.01 GeV, upper sideband |m-(mean+0.0443)| < 0.01 GeV"
+  ],
+  "source": {
+    "analysis_script": "lambda-ana/scripts/pair_distributions/09_pair_jet_distribution_summary.py",
+    "product": "/home/cheyuzhi/work/2025/delphi/analysis/lambda-ana/figures/09_pair_jet_distribution_summary/tight/intermediate/pair_jet_distribution_products.root",
+    "metadata": "/home/cheyuzhi/work/2025/delphi/analysis/lambda-ana/figures/09_pair_jet_distribution_summary/tight/intermediate/pair_jet_distribution_metadata.json",
+    "product_sha256": "adc34ba758bdcee1f1183e79d357821317d4ded153ff3eeccea446f6ea70ff45",
+    "source_metadata_utc": "2026-08-20T15:10:51.301798+00:00",
+    "fixture_generated_utc": "2026-08-21T05:17:29.065525+00:00",
+    "extraction": "ROOT TH1D/TH2D bin edges, contents and GetBinError()^2 (Sumw2 variances); no rebinning or toy generation."
+  },
+  "arrays": {
+    "mass_fit_edges": {
+      "shape": [
+        301
+      ],
+      "dtype": "float64",
+      "meaning": "single-Lambda mass fit bin edges [GeV]"
+    },
+    "mass_fit_counts": {
+      "shape": [
+        300
+      ],
+      "dtype": "float64",
+      "meaning": "all-event LL data Lambda-mass fit counts"
+    },
+    "mass_fit_variances": {
+      "shape": [
+        300
+      ],
+      "dtype": "float64",
+      "meaning": "Sumw2 variances for mass_fit_counts"
+    },
+    "mass_plane_x_edges": {
+      "shape": [
+        101
+      ],
+      "dtype": "float64",
+      "meaning": "first swapped Lambda endpoint mass edges [GeV]"
+    },
+    "mass_plane_y_edges": {
+      "shape": [
+        101
+      ],
+      "dtype": "float64",
+      "meaning": "second swapped Lambda endpoint mass edges [GeV]"
+    },
+    "mass_plane_counts": {
+      "shape": [
+        100,
+        100
+      ],
+      "dtype": "float64",
+      "meaning": "raw cat0/llbar 2-D Lambda-mass-plane counts"
+    },
+    "mass_plane_variances": {
+      "shape": [
+        100,
+        100
+      ],
+      "dtype": "float64",
+      "meaning": "Sumw2 variances for mass_plane_counts"
+    },
+    "mass_region_edges": {
+      "shape": [
+        31
+      ],
+      "dtype": "float64",
+      "meaning": "pair invariant-mass observable edges [GeV]"
+    },
+    "mass_region_counts": {
+      "shape": [
+        4,
+        30
+      ],
+      "dtype": "float64",
+      "meaning": "pair-mass counts, axis 0 ordered SS/BS/SB/BB"
+    },
+    "mass_region_variances": {
+      "shape": [
+        4,
+        30
+      ],
+      "dtype": "float64",
+      "meaning": "Sumw2 variances for mass_region_counts"
+    },
+    "delta_phi_thrust_edges": {
+      "shape": [
+        11
+      ],
+      "dtype": "float64",
+      "meaning": "delta_phi_thrust edges [rad]"
+    },
+    "delta_phi_thrust_counts": {
+      "shape": [
+        4,
+        10
+      ],
+      "dtype": "float64",
+      "meaning": "delta_phi_thrust counts, axis 0 ordered SS/BS/SB/BB"
+    },
+    "delta_phi_thrust_variances": {
+      "shape": [
+        4,
+        10
+      ],
+      "dtype": "float64",
+      "meaning": "Sumw2 variances for delta_phi_thrust_counts"
+    }
+  }
+}
