@@ -444,7 +444,6 @@ w_H
 w_V
 w_C
 weight_covariance
-weight_correlation
 parameter_gradient
 signal_leakage_by_region
 factorization_closure
@@ -589,7 +588,7 @@ write_fit_report_1d(
     sample_metadata,
     output_dir,
     stem,
-) -> ReportArtifacts
+) -> list[Path]
 ```
 
 ```python
@@ -600,7 +599,7 @@ write_fit_report_2d(
     sample_metadata,
     output_dir,
     stem,
-) -> ReportArtifacts
+) -> list[Path]
 ```
 
 ```python
@@ -610,7 +609,7 @@ write_transfer_summary(
     analysis_metadata,
     output_dir,
     stem="transfer_factors",
-) -> ReportArtifacts
+) -> list[Path]
 ```
 
 ### 9.1 一维拟合报告
