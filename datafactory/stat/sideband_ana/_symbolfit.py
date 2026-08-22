@@ -229,7 +229,7 @@ def _run_symbolfit_selection(config: dict) -> dict:
     ``config`` 的 key：centers、density、density_errors、training_mask（以上为
     ndarray）、mass_lo、mass_hi、random_seed、output_dir（str | None）。
     返回可 JSON 序列化的 dict（formula / parameter_names / initial_values /
-    covariance / selection_score / training_chi2 / training_ndf）。
+    covariance）。
     """
     from pysr import PySRRegressor
     from symbolfit.symbolfit import SymbolFit
@@ -301,8 +301,7 @@ def _run_symbolfit_selection(config: dict) -> dict:
 
     dense_masses = np.linspace(mass_lo, mass_hi, 2000)
     selection_scores = []
-    candidate_covariances = []
-    best = None  # (score, formula, names, initial_values, training_chi2, ndf)
+    best = None  # (score, formula, names, initial_values, covariance)
     for _, candidate in model.func_candidates.iterrows():
         formula = candidate["Parameterized equation, unscaled"]
         parameters = candidate["Parameters: (best-fit, +1, -1)"]
@@ -310,7 +309,6 @@ def _run_symbolfit_selection(config: dict) -> dict:
         best_values = {
             name: float(parameters[name][0]) for name in parameter_names
         }
-        background: BackgroundModel | None = None
         training_chi2 = float("nan")
         score = float("inf")
         try:
@@ -333,8 +331,8 @@ def _run_symbolfit_selection(config: dict) -> dict:
             score = float("inf")
         selection_scores.append(score)
 
-        covariance = np.zeros((len(parameter_names), len(parameter_names)))
-        if score < float("inf"):
+        if score < float("inf") and (best is None or score < best[0]):
+            covariance = np.zeros((len(parameter_names), len(parameter_names)))
             for index, name in enumerate(parameter_names):
                 upper_error = abs(float(parameters[name][1]))
                 lower_error = abs(float(parameters[name][2]))
@@ -349,17 +347,7 @@ def _run_symbolfit_selection(config: dict) -> dict:
                 second_index = parameter_names.index(second_name)
                 covariance[first_index, second_index] = covariance_value
                 covariance[second_index, first_index] = covariance_value
-        candidate_covariances.append(covariance)
-
-        if score < float("inf") and (best is None or score < best[0]):
-            best = (
-                score,
-                formula,
-                parameter_names,
-                best_values,
-                training_chi2,
-                int(candidate["NDF"]),
-            )
+            best = (score, formula, parameter_names, best_values, covariance)
 
     if best is None:
         raise RuntimeError(
@@ -370,16 +358,10 @@ def _run_symbolfit_selection(config: dict) -> dict:
         model.func_candidates["Background selection score"] = selection_scores
         model.save_to_csv(output_dir=str(output_dir))
 
-    _, formula, parameter_names, best_values, training_chi2, ndf = best
+    _, formula, parameter_names, best_values, covariance = best
     return {
         "formula": formula,
         "parameter_names": parameter_names,
         "initial_values": best_values,
-        "covariance": candidate_covariances[
-            int(np.argmin(selection_scores))
-        ].tolist(),
-        "selection_score": float(np.min(selection_scores)),
-        "training_chi2": training_chi2,
-        "training_ndf": ndf,
-        "all_scores": [float(s) for s in selection_scores],
+        "covariance": covariance.tolist(),
     }

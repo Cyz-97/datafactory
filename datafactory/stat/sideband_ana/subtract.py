@@ -184,30 +184,19 @@ def subtract_sideband_2d(
                 f"{counts[key].shape} vs {reference_shape}"
             )
 
-    def aggregate(predicate):
-        selected = [
-            counts[key] for key in sorted(expected_keys) if predicate(key)
-        ]
-        if not selected:
-            raise ValueError("subtract_sideband_2d: 聚合时没有可用区域")
-        return np.sum(selected, axis=0)
-
-    def aggregate_variance(predicate):
-        selected = [
-            variances[key] for key in sorted(expected_keys) if predicate(key)
-        ]
-        if not selected:
-            raise ValueError("subtract_sideband_2d: 聚合时没有可用区域")
+    # ponytail: 每轴至少一个 sideband 由 MassRegions1D 保证，聚合必非空。
+    def aggregate(source, predicate):
+        selected = [source[key] for key in sorted(expected_keys) if predicate(key)]
         return np.sum(selected, axis=0)
 
     counts_ss = counts[("S", "S")]
-    counts_bs = aggregate(lambda key: key[0] != "S" and key[1] == "S")
-    counts_sb = aggregate(lambda key: key[0] == "S" and key[1] != "S")
-    counts_bb = aggregate(lambda key: key[0] != "S" and key[1] != "S")
+    counts_bs = aggregate(counts, lambda key: key[0] != "S" and key[1] == "S")
+    counts_sb = aggregate(counts, lambda key: key[0] == "S" and key[1] != "S")
+    counts_bb = aggregate(counts, lambda key: key[0] != "S" and key[1] != "S")
     variance_ss = variances[("S", "S")]
-    variance_bs = aggregate_variance(lambda key: key[0] != "S" and key[1] == "S")
-    variance_sb = aggregate_variance(lambda key: key[0] == "S" and key[1] != "S")
-    variance_bb = aggregate_variance(lambda key: key[0] != "S" and key[1] != "S")
+    variance_bs = aggregate(variances, lambda key: key[0] != "S" and key[1] == "S")
+    variance_sb = aggregate(variances, lambda key: key[0] == "S" and key[1] != "S")
+    variance_bb = aggregate(variances, lambda key: key[0] != "S" and key[1] != "S")
 
     w_h = float(transfer.w_H)
     w_v = float(transfer.w_V)

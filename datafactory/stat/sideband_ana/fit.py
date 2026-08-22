@@ -89,19 +89,6 @@ class NormalizedDensity1D:
         self._density_fn = density_fn
         self.n_points = int(n_points)
 
-    def evaluate(self, mass, parameter_values: Mapping[str, float]) -> np.ndarray:
-        """归一化密度值。"""
-        mass_array = np.asarray(mass, dtype=float)
-        total = self.total_integral(parameter_values)
-        if total <= 0.0:
-            raise ValueError("NormalizedDensity1D: 全区间积分非正")
-        values = np.asarray(
-            self._density_fn(mass_array, parameter_values), dtype=float
-        )
-        if values.shape != mass_array.shape:
-            values = np.broadcast_to(values, mass_array.shape).copy()
-        return values / total
-
     def total_integral(self, parameter_values: Mapping[str, float]) -> float:
         points, weights = _gauss_legendre_points(
             self.mass_lo, self.mass_hi, self.n_points
@@ -184,9 +171,6 @@ class FitResult1D:
     ndf: int
     converged: bool
     background_model: BackgroundModel
-    symbolfit_selection_score: float = 0.0
-    symbolfit_training_chi2: float = 0.0
-    symbolfit_training_ndf: int = 0
 
 
 @dataclass
@@ -249,10 +233,10 @@ def _select_symbolfit_background(
     mass_hi: float,
     random_seed: int,
     output_dir: Path | None,
-) -> tuple[BackgroundModel, np.ndarray, dict]:
+) -> tuple[BackgroundModel, np.ndarray]:
     """在子进程中运行 SymbolFit 候选式搜索并返回最优本底模型。
 
-    返回 (BackgroundModel, 参数协方差, 统计 dict)。
+    返回 (BackgroundModel, 参数协方差)。
     """
     config = {
         "mass_lo": float(mass_lo),
@@ -301,12 +285,7 @@ def _select_symbolfit_background(
         result["initial_values"],
     )
     covariance = np.asarray(result["covariance"], dtype=float)
-    stats = {
-        "selection_score": float(result["selection_score"]),
-        "training_chi2": float(result["training_chi2"]),
-        "training_ndf": int(result["training_ndf"]),
-    }
-    return background_model, covariance, stats
+    return background_model, covariance
 
 
 # ---------------------------------------------------------------------------
@@ -375,17 +354,15 @@ def fit_mass_spectrum_1d(
     output_dir = (
         Path(symbolfit_output_dir) if symbolfit_output_dir is not None else None
     )
-    background_model, background_covariance, symbolfit_stats = (
-        _select_symbolfit_background(
-            centers=centers,
-            density=density,
-            density_errors=density_errors,
-            training_mask=training_mask,
-            mass_lo=mass_lo,
-            mass_hi=mass_hi,
-            random_seed=random_seed,
-            output_dir=output_dir,
-        )
+    background_model, background_covariance = _select_symbolfit_background(
+        centers=centers,
+        density=density,
+        density_errors=density_errors,
+        training_mask=training_mask,
+        mass_lo=mass_lo,
+        mass_hi=mass_hi,
+        random_seed=random_seed,
+        output_dir=output_dir,
     )
 
     # ---- zfit 最终拟合 -----------------------------------------------------
@@ -617,9 +594,6 @@ def fit_mass_spectrum_1d(
         ndf=ndf,
         converged=fit_converged,
         background_model=background_model,
-        symbolfit_selection_score=symbolfit_stats["selection_score"],
-        symbolfit_training_chi2=symbolfit_stats["training_chi2"],
-        symbolfit_training_ndf=symbolfit_stats["training_ndf"],
     )
 
 
@@ -805,72 +779,45 @@ def fit_mass_plane_2d(
         low, high = seed.regions.signal
         return 0.5 * (high - low)
 
-    if shared_axes:
-        signal_names = ("sigma_narrow", "delta_sigma", "narrow_frac")
-        half_width = half_width_of(x_seed)
+    def make_signal_axis(
+        seed_values: Mapping[str, float], half_width: float, suffix: str
+    ):
+        """为一根轴创建共峰 double-Gaussian 的三个形状参数。"""
+        sigma_name, delta_name, fraction_name = (
+            base + suffix
+            for base in ("sigma_narrow", "delta_sigma", "narrow_frac")
+        )
+        names = (sigma_name, delta_name, fraction_name)
         sigma_seed, delta_seed, fraction_seed = signal_shape_seeds(
-            seed_x_values, half_width
+            seed_values, half_width
         )
-        sigma_narrow = zfit.Parameter(
-            f"sigma_narrow_{uid}", sigma_seed, 0.1 * half_width, half_width
+        parameters = [
+            zfit.Parameter(
+                f"{names[0]}_{uid}", sigma_seed, 0.1 * half_width, half_width
+            ),
+            zfit.Parameter(
+                f"{names[1]}_{uid}",
+                delta_seed,
+                0.02 * half_width,
+                2.0 * half_width,
+            ),
+            zfit.Parameter(f"{names[2]}_{uid}", fraction_seed, 0.30, 0.95),
+        ]
+        return names, parameters
+
+    if shared_axes:
+        signal_names_x, signal_parameters_x = make_signal_axis(
+            seed_x_values, half_width_of(x_seed), ""
         )
-        delta_sigma = zfit.Parameter(
-            f"delta_sigma_{uid}",
-            delta_seed,
-            0.02 * half_width,
-            2.0 * half_width,
-        )
-        narrow_frac = zfit.Parameter(
-            f"narrow_frac_{uid}", fraction_seed, 0.30, 0.95
-        )
-        signal_parameters = [sigma_narrow, delta_sigma, narrow_frac]
-        signal_parameters_x = signal_parameters
-        signal_parameters_y = signal_parameters
-        signal_names_x = signal_names
-        signal_names_y = signal_names
+        signal_names_y = signal_names_x
+        signal_parameters_y = signal_parameters_x
     else:
-        signal_names_x = ("sigma_narrow_x", "delta_sigma_x", "narrow_frac_x")
-        signal_names_y = ("sigma_narrow_y", "delta_sigma_y", "narrow_frac_y")
-        half_width_x = half_width_of(x_seed)
-        half_width_y = half_width_of(y_seed)
-        sigma_seed_x, delta_seed_x, fraction_seed_x = signal_shape_seeds(
-            seed_x_values, half_width_x
+        signal_names_x, signal_parameters_x = make_signal_axis(
+            seed_x_values, half_width_of(x_seed), "_x"
         )
-        sigma_seed_y, delta_seed_y, fraction_seed_y = signal_shape_seeds(
-            seed_y_values, half_width_y
+        signal_names_y, signal_parameters_y = make_signal_axis(
+            seed_y_values, half_width_of(y_seed), "_y"
         )
-        sigma_narrow_x = zfit.Parameter(
-            f"sigma_narrow_x_{uid}",
-            sigma_seed_x,
-            0.1 * half_width_x,
-            half_width_x,
-        )
-        delta_sigma_x = zfit.Parameter(
-            f"delta_sigma_x_{uid}",
-            delta_seed_x,
-            0.02 * half_width_x,
-            2.0 * half_width_x,
-        )
-        narrow_frac_x = zfit.Parameter(
-            f"narrow_frac_x_{uid}", fraction_seed_x, 0.30, 0.95
-        )
-        sigma_narrow_y = zfit.Parameter(
-            f"sigma_narrow_y_{uid}",
-            sigma_seed_y,
-            0.1 * half_width_y,
-            half_width_y,
-        )
-        delta_sigma_y = zfit.Parameter(
-            f"delta_sigma_y_{uid}",
-            delta_seed_y,
-            0.02 * half_width_y,
-            2.0 * half_width_y,
-        )
-        narrow_frac_y = zfit.Parameter(
-            f"narrow_frac_y_{uid}", fraction_seed_y, 0.30, 0.95
-        )
-        signal_parameters_x = [sigma_narrow_x, delta_sigma_x, narrow_frac_x]
-        signal_parameters_y = [sigma_narrow_y, delta_sigma_y, narrow_frac_y]
 
     # ---- 本底参数（SymbolFit 表达式，来自一维 seed，zfit profile） ---------
     background_model_x = x_seed.background_model
@@ -936,61 +883,31 @@ def fit_mass_plane_2d(
     edges_x_tf = tf.constant(fit_edges_x, dtype=tf.float64)
     edges_y_tf = tf.constant(fit_edges_y, dtype=tf.float64)
 
-    if shared_axes:
-        sigma_narrow_x, delta_sigma_x, narrow_frac_x = signal_parameters_x
-        sigma_narrow_y, delta_sigma_y, narrow_frac_y = (
-            sigma_narrow_x,
-            delta_sigma_x,
-            narrow_frac_x,
+    # 共享轴模式下 x/y 参数本就是同一组对象，闭包无需区分。
+    sigma_narrow_x, delta_sigma_x, narrow_frac_x = signal_parameters_x
+    sigma_narrow_y, delta_sigma_y, narrow_frac_y = signal_parameters_y
+
+    def signal_fraction_x():
+        return _signal_axis_fractions_tf(
+            edges_x_tf, mean_x, sigma_narrow_x, delta_sigma_x, narrow_frac_x,
+            x_lo, x_hi, tf,
         )
 
-        def signal_fraction_x():
-            return _signal_axis_fractions_tf(
-                edges_x_tf, mean_x, sigma_narrow_x, delta_sigma_x, narrow_frac_x,
-                x_lo, x_hi, tf,
-            )
+    def signal_fraction_y():
+        return _signal_axis_fractions_tf(
+            edges_y_tf, mean_y, sigma_narrow_y, delta_sigma_y, narrow_frac_y,
+            y_lo, y_hi, tf,
+        )
 
-        def signal_fraction_y():
-            return _signal_axis_fractions_tf(
-                edges_y_tf, mean_y, sigma_narrow_y, delta_sigma_y, narrow_frac_y,
-                y_lo, y_hi, tf,
-            )
+    def background_fraction_x():
+        return _background_axis_fractions_tf(
+            fit_edges_x, x_lo, x_hi, bg_evaluator_x, bg_params_x, tf
+        )
 
-        def background_fraction_x():
-            return _background_axis_fractions_tf(
-                fit_edges_x, x_lo, x_hi, bg_evaluator_x, bg_params_x, tf
-            )
-
-        def background_fraction_y():
-            return _background_axis_fractions_tf(
-                fit_edges_y, y_lo, y_hi, bg_evaluator_y, bg_params_y, tf
-            )
-
-    else:
-        sigma_narrow_x, delta_sigma_x, narrow_frac_x = signal_parameters_x
-        sigma_narrow_y, delta_sigma_y, narrow_frac_y = signal_parameters_y
-
-        def signal_fraction_x():
-            return _signal_axis_fractions_tf(
-                edges_x_tf, mean_x, sigma_narrow_x, delta_sigma_x, narrow_frac_x,
-                x_lo, x_hi, tf,
-            )
-
-        def signal_fraction_y():
-            return _signal_axis_fractions_tf(
-                edges_y_tf, mean_y, sigma_narrow_y, delta_sigma_y, narrow_frac_y,
-                y_lo, y_hi, tf,
-            )
-
-        def background_fraction_x():
-            return _background_axis_fractions_tf(
-                fit_edges_x, x_lo, x_hi, bg_evaluator_x, bg_params_x, tf
-            )
-
-        def background_fraction_y():
-            return _background_axis_fractions_tf(
-                fit_edges_y, y_lo, y_hi, bg_evaluator_y, bg_params_y, tf
-            )
+    def background_fraction_y():
+        return _background_axis_fractions_tf(
+            fit_edges_y, y_lo, y_hi, bg_evaluator_y, bg_params_y, tf
+        )
 
     observed_tf = [
         tf.constant(planes_fit[period], dtype=tf.float64)

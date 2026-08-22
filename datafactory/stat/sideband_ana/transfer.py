@@ -286,7 +286,6 @@ class TransferFactors2D:
     w_V: float
     w_C: float
     weight_covariance: np.ndarray
-    weight_correlation: np.ndarray
     parameter_gradient: dict[str, np.ndarray]
     signal_leakage_by_region: dict[tuple[str, str], float]
     factorization_closure: float
@@ -358,8 +357,6 @@ def calculate_transfer_factors_2d(
     x_intervals = x_regions.region_intervals()
     y_intervals = y_regions.region_intervals()
     atomic_keys = _atomic_region_keys(x_regions, y_regions)
-    if len(atomic_keys) != len(set(atomic_keys)):
-        raise ValueError("calculate_transfer_factors_2d: 原子区域 key 出现重复")
 
     def atomic_integrals_at(
         parameter_dict: Mapping[str, float],
@@ -447,13 +444,6 @@ def calculate_transfer_factors_2d(
             f"({weight_covariance})"
         )
 
-    diagonal = np.sqrt(np.diag(weight_covariance))
-    weight_correlation = np.zeros_like(weight_covariance)
-    nonzero = diagonal > 0.0
-    if np.any(nonzero):
-        scale = np.where(nonzero, diagonal, 1.0)
-        weight_correlation = weight_covariance / np.outer(scale, scale)
-
     w_h, w_v, w_c = (float(value) for value in nominal_weights)
 
     return TransferFactors2D(
@@ -465,7 +455,6 @@ def calculate_transfer_factors_2d(
         w_V=w_v,
         w_C=w_c,
         weight_covariance=weight_covariance,
-        weight_correlation=weight_correlation,
         parameter_gradient=gradient,
         signal_leakage_by_region=signal_leakage,
         factorization_closure=float(w_c + w_h * w_v),

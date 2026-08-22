@@ -49,7 +49,6 @@ _LAZY_EXPORTS = {
     "write_fit_report_1d": (".report", "write_fit_report_1d"),
     "write_fit_report_2d": (".report", "write_fit_report_2d"),
     "write_transfer_summary": (".report", "write_transfer_summary"),
-    "ReportArtifacts": (".report", "ReportArtifacts"),
 }
 
 

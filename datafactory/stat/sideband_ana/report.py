@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,7 +18,6 @@ from matplotlib.ticker import MaxNLocator
 from .transfer import MassRegions1D, TransferFactor1D, TransferFactors2D
 
 __all__ = [
-    "ReportArtifacts",
     "write_fit_report_1d",
     "write_fit_report_2d",
     "write_transfer_summary",
@@ -33,13 +31,6 @@ _REGION_LABELS = {
     "L": "low sideband",
     "H": "high sideband",
 }
-
-
-@dataclass
-class ReportArtifacts:
-    """一次报告调用产出的全部文件路径。"""
-
-    paths: list[Path]
 
 
 def _import_matplotlib():
@@ -104,7 +95,7 @@ def write_fit_report_1d(
     sample_metadata: Mapping,
     output_dir: Path | str,
     stem: str,
-) -> ReportArtifacts:
+) -> list[Path]:
     """输出一维质量谱拟合报告 PDF：主图 + 残差 + 参数面板。"""
     plt = _import_matplotlib()
     output_dir = Path(output_dir)
@@ -246,7 +237,7 @@ def write_fit_report_1d(
         metadata=_metadata(sample_metadata, extra=f"1D mass fit: {stem}"),
     )
     plt.close(figure)
-    return ReportArtifacts(paths=[pdf_path])
+    return [pdf_path]
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +282,7 @@ def write_fit_report_2d(
     sample_metadata: Mapping,
     output_dir: Path | str,
     stem: str,
-) -> ReportArtifacts:
+) -> list[Path]:
     """输出二维质量平面拟合报告。
 
     产出三个 PDF：平面三联图（observed/model 共用单个 colorbar，单页）、
@@ -333,7 +324,6 @@ def write_fit_report_2d(
             )
             for name in components
         }
-        region_rows = []
         for key in transfer_result.atomic_region_integrals:
             x_low, x_high = transfer_result.x_regions.region_intervals()[key[0]]
             y_low, y_high = transfer_result.y_regions.region_intervals()[key[1]]
@@ -603,7 +593,7 @@ def write_fit_report_2d(
         )
         plt.close(figure)
 
-    return ReportArtifacts(paths=list(paths))
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -627,12 +617,6 @@ def _jsonable(value):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
-    if isinstance(value, MassRegions1D):
-        return {
-            "signal": list(value.signal),
-            "sideband_low": None if value.sideband_low is None else list(value.sideband_low),
-            "sideband_high": None if value.sideband_high is None else list(value.sideband_high),
-        }
     return value
 
 
@@ -642,7 +626,7 @@ def write_transfer_summary(
     analysis_metadata: Mapping,
     output_dir: Path | str,
     stem: str = "transfer_factors",
-) -> ReportArtifacts:
+) -> list[Path]:
     """汇总所有作用域的 transfer 结果，输出 Markdown / JSON / PDF。
 
     ``named_results`` 的每一项是包含以下 key 的映射::
@@ -808,4 +792,4 @@ def write_transfer_summary(
     figure.savefig(pdf_path, metadata=_metadata(analysis_metadata))
     plt.close(figure)
 
-    return ReportArtifacts(paths=paths)
+    return paths
