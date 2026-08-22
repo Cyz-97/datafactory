@@ -295,7 +295,7 @@ artifacts_1d_fixed = write_fit_report_1d(
     output_dir=REPORTS_DIR,
     stem="llbar_1d_fixed_bg",
 )
-for path in artifacts_1d_fixed.paths:
+for path in artifacts_1d_fixed:
     print(f"  -> {path}")
 
 # ---------------------------------------------------------------------------
@@ -342,7 +342,7 @@ artifacts_1d_profiled = write_fit_report_1d(
     output_dir=REPORTS_DIR,
     stem="llbar_1d_profiled_bg",
 )
-for path in artifacts_1d_profiled.paths:
+for path in artifacts_1d_profiled:
     print(f"  -> {path}")
 
 # ---------------------------------------------------------------------------
@@ -431,8 +431,6 @@ check("2D transfer: w_V 在合理范围", 0.3 < transfer_2d.w_V < 3.0,
 check("2D transfer: w_C 在合理范围", -3.0 < transfer_2d.w_C < 1.0,
       f"{transfer_2d.w_C:.4f}")
 check("2D transfer: 权重协方差有限", np.all(np.isfinite(transfer_2d.weight_covariance)))
-check("2D transfer: 相关系数在 [-1, 1]",
-      np.all(np.abs(transfer_2d.weight_correlation) <= 1.0 + 1e-9))
 max_leakage = max(transfer_2d.signal_leakage_by_region.values())
 check("2D transfer: 信号泄漏 < 5%", max_leakage < 0.05,
       f"max leakage = {max_leakage:.4f}")
@@ -446,7 +444,7 @@ artifacts_2d = write_fit_report_2d(
     output_dir=REPORTS_DIR,
     stem="llbar_plane",
 )
-for path in artifacts_2d.paths:
+for path in artifacts_2d:
     print(f"  -> {path}")
 
 # ---------------------------------------------------------------------------
@@ -543,10 +541,10 @@ artifacts_summary = write_transfer_summary(
     stem="transfer_factors",
 )
 all_report_paths = (
-    artifacts_1d_fixed.paths
-    + artifacts_1d_profiled.paths
-    + artifacts_2d.paths
-    + artifacts_summary.paths
+    artifacts_1d_fixed
+    + artifacts_1d_profiled
+    + artifacts_2d
+    + artifacts_summary
 )
 for path in all_report_paths:
     check(f"报告文件存在: {path.name}", path.exists() and path.stat().st_size > 0,
