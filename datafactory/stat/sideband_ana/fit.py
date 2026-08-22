@@ -223,6 +223,12 @@ class FitResult2D:
     y_projection_observed: np.ndarray
     y_projection_model: np.ndarray
     y_projection_background: np.ndarray
+    x_projection_dense_mass: np.ndarray
+    x_projection_dense_model: np.ndarray
+    x_projection_dense_background: np.ndarray
+    y_projection_dense_mass: np.ndarray
+    y_projection_dense_model: np.ndarray
+    y_projection_dense_background: np.ndarray
     component_models: list[ComponentModel2D]
     x_background_formula: str = ""
     y_background_formula: str = ""
@@ -1178,6 +1184,94 @@ def fit_mass_plane_2d(
         yields["SxBy"] + yields["BxBy"] for yields in component_yields
     ) * bg_frac_y
 
+    # ---- 稠密投影曲线（诊断图光滑绘制） -------------------------------------
+    # 曲线值 = [m−Δ/2, m+Δ/2] 内的期望计数（Δ 为平均原始 bin 宽），与逐 bin
+    # 期望同一定义：在原始 bin 中心处与投影数组一致，同时随 m 连续光滑。
+    def signal_axis_cdf(mass, mean_value, names, lo, hi):
+        sqrt2 = np.sqrt(2.0)
+        sigma_narrow_value = nominal[names[0]]
+        sigma_wide_value = sigma_narrow_value + nominal[names[1]]
+        fraction_value = nominal[names[2]]
+
+        def erf_growth(values, sigma):
+            return erf((values - mean_value) / (sigma * sqrt2)) - erf(
+                (lo - mean_value) / (sigma * sqrt2)
+            )
+
+        norm = fraction_value * erf_growth(hi, sigma_narrow_value) + (
+            1.0 - fraction_value
+        ) * erf_growth(hi, sigma_wide_value)
+        return (
+            fraction_value * erf_growth(mass, sigma_narrow_value)
+            + (1.0 - fraction_value) * erf_growth(mass, sigma_wide_value)
+        ) / norm
+
+    def background_axis_density(mass, model, renamed, lo, hi):
+        params = {
+            original: nominal[name]
+            for original, name in zip(model.parameter_names, renamed)
+        }
+        raw = np.asarray(model._numpy_evaluator(np.asarray(mass), params), dtype=float)
+        if raw.shape != np.shape(mass):
+            raw = np.broadcast_to(raw, np.shape(mass)).copy()
+        nodes, weights = _gauss_legendre_points(lo, hi, 256)
+        node_values = np.asarray(model._numpy_evaluator(nodes, params), dtype=float)
+        return raw / float(np.dot(weights, node_values))
+
+    def background_axis_cdf(mass, model, renamed, lo, hi):
+        grid = np.linspace(lo, hi, 4001)
+        density = background_axis_density(grid, model, renamed, lo, hi)
+        cdf = np.concatenate(
+            ([0.0], np.cumsum(0.5 * (density[1:] + density[:-1]) * np.diff(grid)))
+        )
+        return np.interp(mass, grid, cdf)
+
+    def axis_dense_curves(axis):
+        if axis == "x":
+            lo, hi, n_bins = x_lo, x_hi, n_xbins
+            mean_value, names = mean_x, signal_names_x
+            model_bg, renamed_bg = background_model_x, bg_names_x
+        else:
+            lo, hi, n_bins = y_lo, y_hi, n_ybins
+            mean_value, names = mean_y, signal_names_y
+            model_bg, renamed_bg = background_model_y, bg_names_y
+        # 曲线定义域收缩到 bin 中心范围：滑动半宽窗口必须完整落在拟合区间内。
+        step = 0.5 * (hi - lo) / n_bins
+        dense_mass = np.linspace(lo + step, hi - step, 2000)
+        edges_low = dense_mass - step
+        edges_high = dense_mass + step
+        signal_fraction = signal_axis_cdf(
+            edges_high, mean_value, names, lo, hi
+        ) - signal_axis_cdf(edges_low, mean_value, names, lo, hi)
+        background_fraction = background_axis_cdf(
+            edges_high, model_bg, renamed_bg, lo, hi
+        ) - background_axis_cdf(edges_low, model_bg, renamed_bg, lo, hi)
+        return (
+            dense_mass,
+            signal_total[axis] * signal_fraction
+            + background_total[axis] * background_fraction,
+            background_total[axis] * background_fraction,
+        )
+
+    signal_total = {
+        "x": sum(yields["SxSy"] + yields["SxBy"] for yields in component_yields),
+        "y": sum(yields["SxSy"] + yields["BxSy"] for yields in component_yields),
+    }
+    background_total = {
+        "x": sum(yields["BxSy"] + yields["BxBy"] for yields in component_yields),
+        "y": sum(yields["SxBy"] + yields["BxBy"] for yields in component_yields),
+    }
+    (
+        x_projection_dense_mass,
+        x_projection_dense_model,
+        x_projection_dense_background,
+    ) = axis_dense_curves("x")
+    (
+        y_projection_dense_mass,
+        y_projection_dense_model,
+        y_projection_dense_background,
+    ) = axis_dense_curves("y")
+
     # ---- 分量模型（供 transfer 使用） ---------------------------------------
     def make_signal_pdf(
         mass_lo_value: float,
@@ -1253,6 +1347,12 @@ def fit_mass_plane_2d(
         y_projection_observed=y_projection_observed,
         y_projection_model=y_projection_model,
         y_projection_background=y_projection_background,
+        x_projection_dense_mass=x_projection_dense_mass,
+        x_projection_dense_model=x_projection_dense_model,
+        x_projection_dense_background=x_projection_dense_background,
+        y_projection_dense_mass=y_projection_dense_mass,
+        y_projection_dense_model=y_projection_dense_model,
+        y_projection_dense_background=y_projection_dense_background,
         component_models=component_models,
         x_background_formula=background_model_x.formula,
         y_background_formula=background_model_y.formula,
