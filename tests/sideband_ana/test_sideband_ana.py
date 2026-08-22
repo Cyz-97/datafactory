@@ -3,8 +3,9 @@
 以 tests/data/sideband_ana/ 的 DELPHI Λ-Λbar 真实数据夹具为输入，按
 分析流程逐步执行：区域契约 -> 表达式编译器 -> 一维质量谱拟合（固定 /
 profile 本底）-> 一维 transfer -> 二维质量平面拟合 -> 二维 transfer ->
-二维减除 -> 报告输出。每个 cell 打印中间量并输出验证图表到
-tests/sideband_ana/output/。
+二维减除 -> 报告输出。每个 cell 打印中间量；全部图表通过
+datafactory.stat.sideband_ana.report 的 API 输出（tests/sideband_ana/
+output/reports/ 下的 PDF），transfer 系数只打印到 CLI。
 
 运行（需要 root6.34 环境，约 3-8 分钟，PySR 搜索占大头）::
 
@@ -46,6 +47,7 @@ from datafactory.stat.sideband_ana.report import (  # noqa: E402
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "data" / "sideband_ana"
 OUTPUT_DIR = REPO_ROOT / "tests" / "sideband_ana" / "output"
+REPORTS_DIR = OUTPUT_DIR / "reports"
 RANDOM_SEED = 42
 
 _region_indices = {"SS": 0, "BS": 1, "SB": 2, "BB": 3}
@@ -74,18 +76,6 @@ def check(description: str, condition, detail: str = "") -> None:
         CHECK_FAILURES.append(f"{description}{suffix}")
 
 
-def make_chart(name: str):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    style = REPO_ROOT / "datafactory" / "style.mplstyle"
-    if style.exists():
-        plt.style.use(str(style))
-    return plt, OUTPUT_DIR / f"{name}.png"
-
-
 # ---------------------------------------------------------------------------
 cell("Cell 0: 载入夹具与元数据")
 # ---------------------------------------------------------------------------
@@ -95,6 +85,17 @@ metadata = json.loads(
     (FIXTURE_DIR / "sideband_ll_data_cat0_llbar.json").read_text()
 )
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+sample_metadata = {
+    "caption": "DELPHI Lambda-Lambdabar, all-event, llbar, tight "
+               "(sideband_ana module test)",
+    "sample": "data",
+    "selection": "tight",
+    "source_script": "tests/sideband_ana/test_sideband_ana.py",
+    "x_label": r"$m_{p\pi^-}$ [GeV]",
+    "y_label": r"$m_{p\pi^-}$ [GeV]",
+}
 
 PEAK_MEAN = metadata["mass_fit"]["peak_mean_gev"]
 SIGNAL_HALF_WIDTH = metadata["regions"]["signal_window_gev"]
@@ -139,21 +140,6 @@ try:
     check("拒绝越界区间", False)
 except ValueError:
     check("拒绝越界区间", True)
-
-plt, path = make_chart("fig1_regions")
-figure, ax = plt.subplots(figsize=(7.0, 2.6))
-for label, (low, high) in regions.region_intervals().items():
-    color = "indianred" if label == "S" else "royalblue"
-    ax.axvspan(low, high, color=color, alpha=0.35)
-    ax.text(0.5 * (low + high), 0.7, label, ha="center", fontsize="large")
-ax.set_xlim(float(data["mass_fit_edges"][0]), float(data["mass_fit_edges"][-1]))
-ax.set_yticks([])
-ax.set_xlabel("m [GeV]")
-ax.set_title("region layout (S = signal, H = upper sideband)")
-figure.tight_layout()
-figure.savefig(path, dpi=150)
-plt.close(figure)
-print(f"  -> {path}")
 
 # ---------------------------------------------------------------------------
 cell("Cell 2: 表达式白名单编译器")
@@ -301,39 +287,16 @@ check("固定本底: r 在合理范围", 0.3 < transfer_1d.r_combined < 3.0,
       f"r = {transfer_1d.r_combined:.4f}")
 check("固定本底: r 误差为正", transfer_1d.sigma_r_combined > 0)
 
-plt, path = make_chart("fig2_fit1d_fixed")
-figure = plt.figure(figsize=(8.0, 6.0))
-grid = figure.add_gridspec(2, 1, height_ratios=[3.0, 1.0], hspace=0.08)
-main_ax = figure.add_subplot(grid[0])
-residual_ax = figure.add_subplot(grid[1], sharex=main_ax)
-centers = 0.5 * (fit1d_fixed.mass_edges[:-1] + fit1d_fixed.mass_edges[1:])
-errors = np.sqrt(data["mass_fit_variances"])
-main_ax.errorbar(centers, data["mass_fit_counts"], yerr=errors, fmt=".",
-                 color="black", ms=2, lw=0.5, label="data")
-main_ax.plot(fit1d_fixed.dense_mass, fit1d_fixed.dense_model, color="black",
-             lw=0.9, label="model")
-main_ax.plot(fit1d_fixed.dense_mass, fit1d_fixed.dense_background,
-             color="royalblue", lw=0.9, label="background (SymbolFit, fixed)")
-for label, (low, high) in regions.region_intervals().items():
-    main_ax.axvspan(low, high, color="0.8" if label != "S" else "indianred",
-                    alpha=0.3, lw=0)
-main_ax.set_yscale("log")
-main_ax.set_ylabel("candidates / bin")
-main_ax.legend(frameon=False, fontsize="small")
-ratio = np.where(fit1d_fixed.model_counts > 0,
-                 data["mass_fit_counts"] / np.maximum(fit1d_fixed.model_counts, 1e-9)
-                 - 1.0, np.nan)
-residual_ax.axhline(0.0, color="black", lw=0.6)
-residual_ax.plot(centers, ratio, ".", color="black", ms=2)
-residual_ax.set_xlabel("m [GeV]")
-residual_ax.set_ylabel("data/model - 1")
-residual_ax.set_ylim(-0.5, 0.5)
-figure.suptitle(f"1D fit, background fixed  "
-                f"(chi2/ndf = {fit1d_fixed.chi2 / fit1d_fixed.ndf:.2f})",
-                fontsize="medium")
-figure.savefig(path, dpi=150)
-plt.close(figure)
-print(f"  -> {path}")
+# 一维诊断图通过 report API 输出（数据/模型/本底/残差/参数面板）。
+artifacts_1d_fixed = write_fit_report_1d(
+    fit1d_fixed,
+    transfer_1d,
+    sample_metadata=sample_metadata,
+    output_dir=REPORTS_DIR,
+    stem="llbar_1d_fixed_bg",
+)
+for path in artifacts_1d_fixed.paths:
+    print(f"  -> {path}")
 
 # ---------------------------------------------------------------------------
 cell("Cell 5: 一维质量谱拟合（本底 profile，zfit 联合估计）")
@@ -371,37 +334,16 @@ transfer_1d_profiled = calculate_transfer_factor_1d(fit1d_profiled, regions)
 print(f"  r = {transfer_1d_profiled.r_combined:.4f} ± "
       f"{transfer_1d_profiled.sigma_r_combined:.4f}")
 
-plt, path = make_chart("fig3_fit1d_profiled")
-figure = plt.figure(figsize=(8.0, 6.0))
-grid = figure.add_gridspec(2, 1, height_ratios=[3.0, 1.0], hspace=0.08)
-main_ax = figure.add_subplot(grid[0])
-residual_ax = figure.add_subplot(grid[1], sharex=main_ax)
-main_ax.errorbar(centers, data["mass_fit_counts"], yerr=errors, fmt=".",
-                 color="black", ms=2, lw=0.5, label="data")
-main_ax.plot(fit1d_profiled.dense_mass, fit1d_profiled.dense_model,
-             color="black", lw=0.9, label="model")
-main_ax.plot(fit1d_profiled.dense_mass, fit1d_profiled.dense_background,
-             color="royalblue", lw=0.9, label="background (profiled)")
-for label, (low, high) in regions.region_intervals().items():
-    main_ax.axvspan(low, high, color="0.8" if label != "S" else "indianred",
-                    alpha=0.3, lw=0)
-main_ax.set_yscale("log")
-main_ax.set_ylabel("candidates / bin")
-main_ax.legend(frameon=False, fontsize="small")
-ratio = np.where(fit1d_profiled.model_counts > 0,
-                 data["mass_fit_counts"] / np.maximum(fit1d_profiled.model_counts, 1e-9)
-                 - 1.0, np.nan)
-residual_ax.axhline(0.0, color="black", lw=0.6)
-residual_ax.plot(centers, ratio, ".", color="black", ms=2)
-residual_ax.set_xlabel("m [GeV]")
-residual_ax.set_ylabel("data/model - 1")
-residual_ax.set_ylim(-0.5, 0.5)
-figure.suptitle(f"1D fit, background profiled  "
-                f"(chi2/ndf = {fit1d_profiled.chi2 / fit1d_profiled.ndf:.2f})",
-                fontsize="medium")
-figure.savefig(path, dpi=150)
-plt.close(figure)
-print(f"  -> {path}")
+# profile 本底诊断图同样走 report API。
+artifacts_1d_profiled = write_fit_report_1d(
+    fit1d_profiled,
+    transfer_1d_profiled,
+    sample_metadata=sample_metadata,
+    output_dir=REPORTS_DIR,
+    stem="llbar_1d_profiled_bg",
+)
+for path in artifacts_1d_profiled.paths:
+    print(f"  -> {path}")
 
 # ---------------------------------------------------------------------------
 cell("Cell 6: 二维质量平面拟合（共享轴，四分量）")
@@ -448,37 +390,21 @@ x_pull = (x_observed_fitgrid - x_model_fitgrid) / np.sqrt(
 check("2D 拟合: x 投影逐 bin pull 合理（拟合网格）", np.max(np.abs(x_pull)) < 5.0,
       f"max|pull| = {np.max(np.abs(x_pull)):.2f}, chi2/20 = {np.sum(x_pull**2) / 20:.2f}")
 
-plt, path = make_chart("fig4_fit2d_plane")
-figure, axes = plt.subplots(1, 3, figsize=(13.0, 4.2))
-x_centers = 0.5 * (fit2d.x_edges[:-1] + fit2d.x_edges[1:])
-y_centers = 0.5 * (fit2d.y_edges[:-1] + fit2d.y_edges[1:])
-observed_plane = counts_by_period.sum(axis=0)
-model_plane = fit2d.model_counts_by_period.sum(axis=0)
-plane_ratio = np.where(model_plane > 0, observed_plane / model_plane - 1.0, np.nan)
-for ax, values, title, kwargs in (
-    (axes[0], observed_plane, "observed", {}),
-    (axes[1], model_plane, "model", {"vmin": 0.0}),
-    (axes[2], plane_ratio, "observed/model - 1", {"vmin": -0.3, "vmax": 0.3}),
+# 二维诊断图（平面三联图 + 区域事例数标注 + 投影图）在 transfer 算完后
+# 通过 write_fit_report_2d 输出（见 Cell 7）。稠密曲线一致性检查：在原始
+# bin 中心处应与逐 bin 期望一致（同一积分定义）。
+for axis_name, dense_m, dense_mod, perbin_mod, centers in (
+    ("x", fit2d.x_projection_dense_mass, fit2d.x_projection_dense_model,
+     fit2d.x_projection_model.sum(axis=0),
+     0.5 * (fit2d.x_edges[:-1] + fit2d.x_edges[1:])),
+    ("y", fit2d.y_projection_dense_mass, fit2d.y_projection_dense_model,
+     fit2d.y_projection_model.sum(axis=0),
+     0.5 * (fit2d.y_edges[:-1] + fit2d.y_edges[1:])),
 ):
-    mesh = ax.pcolormesh(x_centers, y_centers, values.T, **kwargs)
-    figure.colorbar(mesh, ax=ax, shrink=0.85)
-    ax.set_aspect("equal")
-    ax.set_xlabel("m1 [GeV]")
-    ax.set_ylabel("m2 [GeV]")
-    ax.set_title(title, fontsize="small")
-for ax in axes:
-    for x_label, (x_low, x_high) in regions.region_intervals().items():
-        for y_label, (y_low, y_high) in regions.region_intervals().items():
-            color = "red" if (x_label, y_label) == ("S", "S") else "white"
-            lw = 1.4 if color == "red" else 0.6
-            ax.add_patch(plt.Rectangle((x_low, y_low), x_high - x_low,
-                                       y_high - y_low, fill=False,
-                                       edgecolor=color, lw=lw))
-figure.suptitle("2D mass-plane fit (shared axes)", fontsize="medium")
-figure.tight_layout()
-figure.savefig(path, dpi=150)
-plt.close(figure)
-print(f"  -> {path}")
+    dense_at_centers = np.interp(centers, dense_m, dense_mod)
+    max_rel = float(np.max(np.abs(dense_at_centers / perbin_mod - 1.0)))
+    check(f"2D 投影 {axis_name}: 稠密曲线在 bin 中心与逐 bin 期望一致 (<0.5%)",
+          max_rel < 5.0e-3, f"max rel dev = {max_rel:.3%}")
 
 # ---------------------------------------------------------------------------
 cell("Cell 7: 二维 transfer coefficients")
@@ -511,30 +437,17 @@ max_leakage = max(transfer_2d.signal_leakage_by_region.values())
 check("2D transfer: 信号泄漏 < 5%", max_leakage < 0.05,
       f"max leakage = {max_leakage:.4f}")
 
-plt, path = make_chart("fig5_transfer2d")
-figure, ax = plt.subplots(figsize=(6.5, 4.0))
-names = ["w_H", "w_V", "w_C"]
-values = [transfer_2d.w_H, transfer_2d.w_V, transfer_2d.w_C]
-errors_w = list(sigma_w)
-positions = np.arange(3)
-colors = ["royalblue", "seagreen", "indianred"]
-ax.bar(positions, values, yerr=errors_w, width=0.55, color=colors,
-       error_kw={"lw": 1.2, "capsize": 4})
-for position, value, error in zip(positions, values, errors_w):
-    ax.text(position, value + (error if value >= 0 else -error) + 0.05,
-            f"{value:.3f}±{error:.3f}", ha="center", fontsize="small")
-ax.axhline(0.0, color="black", lw=0.6)
-ax.axhline(1.0, color="gray", lw=0.6, ls="--")
-ax.axhline(-1.0, color="gray", lw=0.6, ls="--")
-ax.set_xticks(positions, names)
-ax.set_ylabel("transfer coefficient")
-ax.set_title("2D transfer coefficients "
-             f"(closure = {transfer_2d.factorization_closure:.3f})",
-             fontsize="medium")
-figure.tight_layout()
-figure.savefig(path, dpi=150)
-plt.close(figure)
-print(f"  -> {path}")
+# transfer 系数只打印到 CLI，不画柱状图。
+# 二维诊断图（平面三联图 + 区域事例数标注 + 积分/w 页 + 投影图）：
+artifacts_2d = write_fit_report_2d(
+    fit2d,
+    transfer_2d,
+    sample_metadata=sample_metadata,
+    output_dir=REPORTS_DIR,
+    stem="llbar_plane",
+)
+for path in artifacts_2d.paths:
+    print(f"  -> {path}")
 
 # ---------------------------------------------------------------------------
 cell("Cell 8: 二维减除（Δφ_thrust 分布，4 个质量区域 × 10 bin）")
@@ -586,60 +499,10 @@ subtraction_1d = subtract_sideband_1d(
 print(f"  1D r 减除信号总数 = {subtraction_1d.subtracted_signal.sum():.0f} ± "
       f"{np.sqrt(subtraction_1d.signal_variance.sum()):.0f}")
 
-plt, path = make_chart("fig6_subtraction")
-figure, ax = plt.subplots(figsize=(7.5, 5.0))
-bin_centers = 0.5 * (delta_phi_edges[:-1] + delta_phi_edges[1:])
-bin_widths = np.diff(delta_phi_edges)
-ax.errorbar(bin_centers, subtraction.observed_signal_region,
-            yerr=np.sqrt(subtraction.observed_variance), fmt=".", color="black",
-            ms=5, lw=0.8, label="SS observed")
-ax.errorbar(bin_centers, subtraction.estimated_background,
-            yerr=np.sqrt(subtraction.background_variance), fmt="s",
-            color="royalblue", ms=4, lw=0.8, mfc="none",
-            label="estimated background (w_H/w_V/w_C)")
-ax.errorbar(bin_centers, subtraction.subtracted_signal,
-            yerr=np.sqrt(subtraction.signal_variance), fmt="o", color="crimson",
-            ms=5, lw=0.8, mfc="none", label="subtracted signal")
-ax.bar(bin_centers, subtraction_1d.subtracted_signal, width=bin_widths * 0.9,
-       alpha=0.15, color="seagreen",
-       label="subtracted signal (1D r, cross-check)")
-ax.set_xlabel(r"$\Delta\phi_{\mathrm{thrust}}$ [rad]")
-ax.set_ylabel("candidates / bin")
-ax.legend(frameon=False, fontsize="small")
-ax.set_title("2D sideband subtraction on #Delta#phi_thrust", fontsize="medium")
-figure.tight_layout()
-figure.savefig(path, dpi=150)
-plt.close(figure)
-print(f"  -> {path}")
-
 # ---------------------------------------------------------------------------
-cell("Cell 9: 报告输出")
+cell("9: transfer 汇总与产物检查")
 # ---------------------------------------------------------------------------
 
-sample_metadata = {
-    "caption": "DELPHI Lambda-Lambdabar, all-event, llbar, tight "
-               "(sideband_ana module test)",
-    "sample": "data",
-    "selection": "tight",
-    "source_script": "tests/sideband_ana/test_sideband_ana.py",
-    "x_label": r"$m_{p\pi^-}$ [GeV]",
-    "y_label": r"$m_{p\pi^-}$ [GeV]",
-}
-report_dir = OUTPUT_DIR / "reports"
-artifacts_1d = write_fit_report_1d(
-    fit1d_profiled,
-    transfer_1d_profiled,
-    sample_metadata=sample_metadata,
-    output_dir=report_dir,
-    stem="llbar_fixed_profiled",
-)
-artifacts_2d = write_fit_report_2d(
-    fit2d,
-    transfer_2d,
-    sample_metadata=sample_metadata,
-    output_dir=report_dir,
-    stem="llbar_plane",
-)
 artifacts_summary = write_transfer_summary(
     [
         {
@@ -676,18 +539,21 @@ artifacts_summary = write_transfer_summary(
         "selection": metadata.get("selection", ""),
         "peak_mean_gev": PEAK_MEAN,
     },
-    output_dir=report_dir,
+    output_dir=REPORTS_DIR,
     stem="transfer_factors",
 )
 all_report_paths = (
-    artifacts_1d.paths + artifacts_2d.paths + artifacts_summary.paths
+    artifacts_1d_fixed.paths
+    + artifacts_1d_profiled.paths
+    + artifacts_2d.paths
+    + artifacts_summary.paths
 )
 for path in all_report_paths:
     check(f"报告文件存在: {path.name}", path.exists() and path.stat().st_size > 0,
           f"{path.stat().st_size if path.exists() else 0} bytes")
 
 # JSON 汇总应可解析且包含三个条目。
-summary_json = json.loads((report_dir / "transfer_factors.json").read_text())
+summary_json = json.loads((REPORTS_DIR / "transfer_factors.json").read_text())
 check("transfer JSON 可解析且含 3 个条目", len(summary_json["results"]) == 3)
 
 # ---------------------------------------------------------------------------
