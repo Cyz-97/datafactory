@@ -294,8 +294,10 @@ def write_fit_report_2d(
 ) -> ReportArtifacts:
     """输出二维质量平面拟合报告。
 
-    产出三个 PDF：平面三联图（观测/模型/残差比 + 第二页积分表与 w 代入式）、
-    x 投影、y 投影。
+    产出三个 PDF：平面三联图（observed/model 共用单个 colorbar，单页）、
+    各区域 data vs model 事例数柱状图（独立 PDF）、x 投影、y 投影。
+    拟合参数、区域积分表、w 代入式与区域事例数数值等文本信息以结构化
+    表格打印到 terminal，不写入 PDF。
     """
     plt = _import_matplotlib()
     output_dir = Path(output_dir)
@@ -314,136 +316,199 @@ def write_fit_report_2d(
     ratio = np.full_like(model, np.nan, dtype=float)
     ratio[valid] = observed[valid] / model[valid] - 1.0
 
-    x_centers = 0.5 * (fit_result.x_edges[:-1] + fit_result.x_edges[1:])
-    y_centers = 0.5 * (fit_result.y_edges[:-1] + fit_result.y_edges[1:])
+    x_edges = np.asarray(fit_result.x_edges, dtype=float)
+    y_edges = np.asarray(fit_result.y_edges, dtype=float)
+    x_bin_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_bin_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+    components = ["SxSy", "BxSy", "SxBy", "BxBy"]
 
-    from matplotlib.backends.backend_pdf import PdfPages
+    # 各原子区域的 data bin-content 和与模型期望计数（产额 × 区域积分）。
+    # data 按 bin 中心点归入区域；模型积分用精确区域边界。
+    region_rows: list = []
+    if transfer_result is not None:
+        component_totals = {
+            name: sum(
+                yields[name]
+                for yields in fit_result.component_yields_by_period
+            )
+            for name in components
+        }
+        region_rows = []
+        for key in transfer_result.atomic_region_integrals:
+            x_low, x_high = transfer_result.x_regions.region_intervals()[key[0]]
+            y_low, y_high = transfer_result.y_regions.region_intervals()[key[1]]
+            in_x = (x_bin_centers >= x_low) & (x_bin_centers < x_high)
+            in_y = (y_bin_centers >= y_low) & (y_bin_centers < y_high)
+            data_sum = float(observed[np.ix_(in_x, in_y)].sum())
+            model_sum = float(sum(
+                component_totals[name]
+                * transfer_result.atomic_region_integrals[key][name]
+                for name in components
+            ))
+            pull = (
+                (data_sum - model_sum) / np.sqrt(model_sum)
+                if model_sum > 0.0 else np.nan
+            )
+            region_rows.append((f"{key[0]}{key[1]}", data_sum, model_sum, pull))
 
+    # ---- 文本信息打印到 terminal（结构化表格，不写入 PDF） -------------------
+    tag = f"[write_fit_report_2d:{stem}]"
+
+    def _section(title: str) -> None:
+        print(f"\n{tag} ---- {title} " + "-" * max(0, 56 - len(title)))
+
+    _section("fit information")
+    print(f"{'periods':<26}: {fit_result.n_periods}")
+    print(f"{'fit bins':<26}: {fit_result.fit_nbins} x {fit_result.fit_nbins}")
+    print(f"{'NLL':<26}: {fit_result.nll_value:.2f}")
+
+    _section("component yields")
+    print(f"{'period':<10}" + "".join(f"{name:>14}" for name in components))
+    for period, yields in enumerate(fit_result.component_yields_by_period):
+        print(f"{'p' + str(period):<10}"
+              + "".join(f"{yields[name]:>14.0f}" for name in components))
+
+    _section("shape parameters")
+    errors_vec = np.sqrt(np.clip(np.diag(fit_result.parameter_covariance), 0.0, None))
+    print(f"{'name':<26}{'value':>14}{'error':>14}")
+    for index, name in enumerate(fit_result.parameter_names):
+        if name.startswith("N_"):
+            continue
+        print(f"{name:<26}{fit_result.parameter_values[index]:>14.4g}"
+              f"{errors_vec[index]:>14.2g}")
+
+    if transfer_result is not None:
+        _section("component integrals per atomic region")
+        print(f"{'region':<10}" + "".join(f"{name:>14}" for name in components))
+        for key, values in transfer_result.atomic_region_integrals.items():
+            print(f"{key[0] + key[1]:<10}"
+                  + "".join(f"{values[name]:>14.4g}" for name in components))
+
+        _section("aggregated region integrals")
+        print(f"{'component':<10}"
+              + "".join(f"{k:>14}" for k in ("SS", "BS", "SB", "BB")))
+        aggregated = transfer_result.aggregated_region_integrals
+        for component in components:
+            entries = aggregated[component]
+            print(f"{component:<10}"
+                  + "".join(f"{entries[k]:>14.4g}" for k in ("SS", "BS", "SB", "BB")))
+
+        _section("transfer coefficients")
+        sigma_w = np.sqrt(
+            np.clip(np.diag(transfer_result.weight_covariance), 0.0, None)
+        )
+        bxsy = aggregated["BxSy"]
+        sxby = aggregated["SxBy"]
+        bxby = aggregated["BxBy"]
+        print(f"  w_H = {bxsy['SS']:.4g} / {bxsy['BS']:.4g} "
+              f"= {transfer_result.w_H:.4f} ± {sigma_w[0]:.4f}")
+        print(f"  w_V = {sxby['SS']:.4g} / {sxby['SB']:.4g} "
+              f"= {transfer_result.w_V:.4f} ± {sigma_w[1]:.4f}")
+        print(f"  w_C = ({bxby['SS']:.4g} - w_H*{bxby['BS']:.4g} "
+              f"- w_V*{bxby['SB']:.4g}) / {bxby['BB']:.4g} "
+              f"= {transfer_result.w_C:.4f} ± {sigma_w[2]:.4f}")
+        print(f"  closure w_C + w_H*w_V = {transfer_result.factorization_closure:.4g}")
+
+        _section("signal leakage f_SxSy(R) / f_SxSy(SS)")
+        for key, value in transfer_result.signal_leakage_by_region.items():
+            print(f"  {key[0]}{key[1]}: {value:.4g}")
+
+    # ---- 平面三联图（单页 PDF；data/model 共享色标） ------------------------
     plane_path = output_dir / f"{stem}_fit2d_plane.pdf"
     paths.append(plane_path)
-    with PdfPages(plane_path, metadata=_metadata(sample_metadata, extra=f"2D mass-plane fit: {stem}")) as pdf:
-        # 第一页：三联图 + 参数文本面板。
-        figure = plt.figure(figsize=(11.0, 4.6))
-        grid = figure.add_gridspec(1, 4, width_ratios=[1, 1, 1, 1.1], wspace=0.5)
-        axes = [figure.add_subplot(grid[0, index]) for index in range(3)]
-        mesh_observed = _plane_panel(
-            axes[0], x_centers, y_centers, observed.T, "observed"
+    figure = plt.figure(figsize=(11.5, 4.4))
+    grid = figure.add_gridspec(1, 3, wspace=0.55)
+    axes = [figure.add_subplot(grid[0, index]) for index in range(3)]
+    vmax_common = float(max(observed.max(), model.max()))
+    mesh_observed = _plane_panel(
+        axes[0], x_edges, y_edges, observed.T, "observed",
+        vmin=0.0, vmax=vmax_common,
+    )
+    mesh_model = _plane_panel(
+        axes[1], x_edges, y_edges, model.T, "model",
+        vmin=0.0, vmax=vmax_common,
+    )
+    mesh_ratio = _plane_panel(
+        axes[2], x_edges, y_edges, ratio.T, "observed/model - 1"
+    )
+    figure.colorbar(mesh_model, ax=axes[:2], shrink=0.9,
+                    label="candidates / bin")
+    figure.colorbar(mesh_ratio, ax=axes[2], shrink=0.9)
+    for ax in axes:
+        if same_quantity:
+            ax.set_aspect("equal")
+        ax.set_xlabel(x_label, fontsize="small")
+        ax.set_ylabel(y_label, fontsize="small")
+    if transfer_result is not None:
+        for ax in axes:
+            _region_rectangles(ax, transfer_result.x_regions, transfer_result.y_regions)
+        # 区域事例数标注：observed 面板标 data，model 面板标模型期望。
+        label_style = dict(
+            color="white", ha="center", va="center", fontsize="x-small",
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.45, ec="none"),
         )
-        mesh_model = _plane_panel(
-            axes[1], x_centers, y_centers, model.T, "model", vmin=0.0
-        )
-        mesh_ratio = _plane_panel(
-            axes[2], x_centers, y_centers, ratio.T, "observed/model - 1"
-        )
-        for ax, mesh in zip(axes, (mesh_observed, mesh_model, mesh_ratio)):
-            figure.colorbar(mesh, ax=ax, shrink=0.85)
-            if same_quantity:
-                ax.set_aspect("equal")
-            ax.set_xlabel(x_label, fontsize="small")
-            ax.set_ylabel(y_label, fontsize="small")
-        if transfer_result is not None:
-            for ax in axes:
-                _region_rectangles(ax, transfer_result.x_regions, transfer_result.y_regions)
+        for row, key in zip(region_rows, transfer_result.atomic_region_integrals):
+            x_low, x_high = transfer_result.x_regions.region_intervals()[key[0]]
+            y_low, y_high = transfer_result.y_regions.region_intervals()[key[1]]
+            center_x = 0.5 * (x_low + x_high)
+            center_y = 0.5 * (y_low + y_high)
+            axes[0].text(center_x, center_y, f"{row[1]:,.0f}", **label_style)
+            axes[1].text(center_x, center_y, f"{row[2]:,.0f}", **label_style)
+    caption = str(sample_metadata.get("caption", ""))
+    if caption:
+        figure.suptitle(caption, fontsize="medium")
+    figure.savefig(
+        plane_path,
+        metadata=_metadata(sample_metadata, extra=f"2D mass-plane fit: {stem}"),
+    )
+    plt.close(figure)
 
-        text_ax = figure.add_subplot(grid[0, 3])
-        text_ax.axis("off")
-        lines = []
-        lines.append(f"periods: {fit_result.n_periods}, fit bins: {fit_result.fit_nbins}x{fit_result.fit_nbins}")
-        lines.append(f"NLL = {fit_result.nll_value:.2f}")
-        lines.append("")
-        lines.append("component yields:")
-        for period, yields in enumerate(fit_result.component_yields_by_period):
-            entries = ", ".join(
-                f"{name}: {value:.0f}" for name, value in yields.items()
-            )
-            lines.append(f"  p{period}: {entries}")
-        lines.append("")
-        lines.append("shape parameters:")
-        errors_vec = np.sqrt(np.clip(np.diag(fit_result.parameter_covariance), 0.0, None))
-        for index, name in enumerate(fit_result.parameter_names):
-            if name.startswith("N_"):
-                continue
-            lines.append(
-                f"  {name} = {fit_result.parameter_values[index]:.4g} "
-                f"± {errors_vec[index]:.2g}"
-            )
-        text_ax.text(
-            0.0, 1.0, "\n".join(lines), va="top", ha="left",
-            fontsize="small", transform=text_ax.transAxes,
+    # ---- 区域事例数对比：数值表打印到 terminal，柱状图为独立 PDF ------------
+    if region_rows:
+        _section("region content: data vs model")
+        print(f"{'region':<10}{'data':>14}{'model':>14}{'pull':>10}")
+        for label, data_sum, model_sum, pull in region_rows:
+            pull_text = f"{pull:+.2f}" if np.isfinite(pull) else "n/a"
+            print(f"{label:<10}{data_sum:>14.0f}{model_sum:>14.0f}{pull_text:>10}")
+        print("  (data: bins assigned by center; model: yields x region integrals)")
+
+        region_path = output_dir / f"{stem}_fit2d_region_content.pdf"
+        paths.append(region_path)
+        figure = plt.figure(figsize=(7.0, 4.8))
+        ax_bars = figure.add_subplot(1, 1, 1)
+        positions = np.arange(len(region_rows))
+        bar_width = 0.38
+        data_values = np.asarray([row[1] for row in region_rows])
+        model_values = np.asarray([row[2] for row in region_rows])
+        ax_bars.bar(
+            positions - 0.5 * bar_width, data_values, width=bar_width,
+            color="black", yerr=np.sqrt(np.maximum(data_values, 0.0)),
+            error_kw={"lw": 0.9, "capsize": 3}, label="data",
         )
-        caption = str(sample_metadata.get("caption", ""))
-        if caption:
-            figure.suptitle(caption, fontsize="medium")
-        pdf.savefig(figure)
+        ax_bars.bar(
+            positions + 0.5 * bar_width, model_values, width=bar_width,
+            color="royalblue", label="model",
+        )
+        for position, row in zip(positions, region_rows):
+            if np.isfinite(row[3]):
+                ax_bars.text(
+                    position, max(row[1], row[2]), f"pull={row[3]:+.1f}",
+                    ha="center", va="bottom", fontsize="x-small",
+                )
+        ax_bars.set_xticks(positions, [row[0] for row in region_rows])
+        ax_bars.set_ylabel("candidates in region")
+        ax_bars.legend(frameon=False, fontsize="small")
+        ax_bars.set_title(
+            "region content: data (bin centers) vs model (region integrals)",
+            fontsize="small",
+        )
+        figure.tight_layout()
+        figure.savefig(
+            region_path,
+            metadata=_metadata(sample_metadata, extra=f"2D fit region content: {stem}"),
+        )
         plt.close(figure)
-
-        # 第二页：分量 x 区域积分表 + w 代入式（需要 transfer）。
-        if transfer_result is not None:
-            figure = plt.figure(figsize=(11.0, 6.0))
-            ax_table = figure.add_subplot(1, 2, 1)
-            ax_text = figure.add_subplot(1, 2, 2)
-            ax_text.axis("off")
-
-            components = ["SxSy", "BxSy", "SxBy", "BxBy"]
-            atomic_keys = list(transfer_result.atomic_region_integrals)
-            cell_text = []
-            for key in atomic_keys:
-                values = transfer_result.atomic_region_integrals[key]
-                cell_text.append(
-                    [f"{key[0]}{key[1]}"]
-                    + [f"{values[name]:.4g}" for name in components]
-                )
-            ax_table.axis("off")
-            ax_table.table(
-                cellText=cell_text,
-                colLabels=["region"] + components,
-                cellLoc="center",
-                loc="upper center",
-            )
-            ax_table.set_title(
-                "component integrals per atomic region", fontsize="small"
-            )
-
-            aggregated = transfer_result.aggregated_region_integrals
-            sigma_w = np.sqrt(np.clip(np.diag(transfer_result.weight_covariance), 0.0, None))
-            text_lines = ["aggregated integrals:"]
-            for component in components:
-                entries = aggregated[component]
-                text_lines.append(
-                    f"  {component}: "
-                    + ", ".join(f"{key}={value:.4g}" for key, value in entries.items())
-                )
-            text_lines.append("")
-            text_lines.append("transfer coefficients:")
-            bxsy = aggregated["BxSy"]
-            sxby = aggregated["SxBy"]
-            bxby = aggregated["BxBy"]
-            text_lines.append(
-                f"  w_H = {bxsy['SS']:.4g} / {bxsy['BS']:.4g} "
-                f"= {transfer_result.w_H:.4f} ± {sigma_w[0]:.4f}"
-            )
-            text_lines.append(
-                f"  w_V = {sxby['SS']:.4g} / {sxby['SB']:.4g} "
-                f"= {transfer_result.w_V:.4f} ± {sigma_w[1]:.4f}"
-            )
-            text_lines.append(
-                f"  w_C = ({bxby['SS']:.4g} - w_H*{bxby['BS']:.4g} "
-                f"- w_V*{bxby['SB']:.4g}) / {bxby['BB']:.4g} "
-                f"= {transfer_result.w_C:.4f} ± {sigma_w[2]:.4f}"
-            )
-            text_lines.append(
-                f"  closure w_C + w_H*w_V = {transfer_result.factorization_closure:.4g}"
-            )
-            text_lines.append("")
-            text_lines.append("signal leakage (f_SxSy(R) / f_SxSy(SS)):")
-            for key, value in transfer_result.signal_leakage_by_region.items():
-                text_lines.append(f"  {key[0]}{key[1]}: {value:.4g}")
-            ax_text.text(
-                0.0, 1.0, "\n".join(text_lines), va="top", ha="left",
-                fontsize="small", transform=ax_text.transAxes,
-            )
-            pdf.savefig(figure)
-            plt.close(figure)
 
     # 投影图（x 和 y）。observed/model 带 period 轴 (n_periods, n_bins)，
     # background 已经是 period 求和后的 1D，只有 ndim==2 时才压缩。
@@ -454,14 +519,18 @@ def write_fit_report_2d(
     projections = (
         ("x", _projection_total(fit_result.x_projection_observed),
          _projection_total(fit_result.x_projection_model),
-         _projection_total(fit_result.x_projection_background),
-         x_centers, x_label),
+         fit_result.x_projection_dense_mass,
+         fit_result.x_projection_dense_model,
+         fit_result.x_projection_dense_background,
+         x_bin_centers, x_label),
         ("y", _projection_total(fit_result.y_projection_observed),
          _projection_total(fit_result.y_projection_model),
-         _projection_total(fit_result.y_projection_background),
-         y_centers, y_label),
+         fit_result.y_projection_dense_mass,
+         fit_result.y_projection_dense_model,
+         fit_result.y_projection_dense_background,
+         y_bin_centers, y_label),
     )
-    for axis_name, observed_proj, model_proj, background_proj, bin_centers, axis_label in projections:
+    for axis_name, observed_proj, model_proj, dense_mass, dense_model, dense_background, bin_centers, axis_label in projections:
         figure = plt.figure(figsize=(7.5, 6.0))
         grid = figure.add_gridspec(2, 1, height_ratios=[3.0, 1.0], hspace=0.08)
         main_ax = figure.add_subplot(grid[0])
@@ -478,9 +547,9 @@ def write_fit_report_2d(
             lw=0.8,
             label="data",
         )
-        main_ax.plot(bin_centers, model_proj, color="black", lw=0.9, label="model")
+        main_ax.plot(dense_mass, dense_model, color="black", lw=0.9, label="model")
         main_ax.plot(
-            bin_centers, background_proj, color="royalblue", lw=0.9,
+            dense_mass, dense_background, color="royalblue", lw=0.9,
             label="background",
         )
         if transfer_result is not None:
