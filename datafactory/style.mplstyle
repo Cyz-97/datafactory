@@ -430,7 +430,7 @@ savefig.bbox        : standard # 'tight' or 'standard'.
                                # backends (e.g. 'ffmpeg') but will work with those
                                # based on temporary files (e.g. 'ffmpeg_file')
 savefig.pad_inches  : 0.01      # Padding to be used when bbox is set to 'tight'
-savefig.transparent : True    # setting that controls whether figures are saved with a
+savefig.transparent : False    # setting that controls whether figures are saved with a
                                # transparent background by default
 savefig.orientation : portrait
 
