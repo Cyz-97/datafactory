@@ -24,7 +24,7 @@ __all__ = ["BackgroundModel", "_compile_expression", "_run_symbolfit_selection"]
 #
 # 支持的语法：数字常量、x0、参数符号 a1/a2/...、+ - *、**(非负整数次幂)、
 # exp()、square()。每个 ** 的指数必须是非负整数，且底数/指数内部不得再嵌
-# 套 **；exp() 的参数必须是 x0 的次数 <= 1 的多项式。其余节点立即报错。
+# 套 **；exp() 的参数必须是 x0 的次数 <= 6 的多项式。其余节点立即报错。
 
 
 def _validate_powers(tree: ast.AST, formula: str) -> None:
@@ -111,13 +111,19 @@ def _compile_expression(
                 node.value, (int, float)
             ):
                 raise ValueError(f"表达式含非常量操作数: {formula}")
-            return lambda mass, params: node.value
+            # 常数叶子必须随 mass 形状广播: 纯常数式 (如 "3.0e7") 或不含 x0 的
+            # 参数式会退化为标量, 在二维拟合的 tf.reshape((bins, n_quad)) 处
+            # 直接崩溃。value + mass*0 对 numpy 与 TensorFlow 同构且不改变
+            # dtype (整数字面量 0 不触发 float32 提升), 标量输入仍返回标量。
+            value = node.value
+            return lambda mass, params: value + mass * 0
         if isinstance(node, ast.Name):
             if node.id == "x0":
                 return lambda mass, params: mass
             if node.id in known_parameters:
                 name = node.id
-                return lambda mass, params: params[name]
+                # 参数叶子同样广播 (见上: 不含 x0 的表达式整体为标量).
+                return lambda mass, params: params[name] + mass * 0
             raise ValueError(
                 f"表达式含未知符号 {node.id}（既不是 x0 也不是拟合参数）: {formula}"
             )
@@ -153,9 +159,9 @@ def _compile_expression(
             argument = build(node.args[0])
             if node.func.id == "exp":
                 degree = _polynomial_degree_in_mass(node.args[0])
-                if degree is None or degree > 1:
+                if degree is None or degree > 6:
                     raise ValueError(
-                        f"exp() 的参数必须是 x0 的次数 <= 1 的多项式: {formula}"
+                        f"exp() 的参数必须是 x0 的次数 <= 6 的多项式: {formula}"
                     )
                 return lambda mass, params: exp(argument(mass, params))
             return lambda mass, params: square(argument(mass, params))

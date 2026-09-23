@@ -687,7 +687,7 @@ def fit_mass_plane_2d(
     """拟合计数质量平面：SxSy / BxSy / SxBy / BxBy 四分量模型。
 
     每个时期具有独立、非负的四分量产额；信号形状（共峰 double-Gaussian，
-    峰位固定为一维结果）与本底形状（SymbolFit 表达式，参数浮动）跨时期共享。
+    由一维结果标定）固定，本底形状参数跨时期共享并浮动。
     ``y_seed=None`` 表示两轴共享同一套一维模型（要求两轴 binning 一致）。
     损失为逐时期 extended Poisson binned NLL。
     """
@@ -752,7 +752,7 @@ def fit_mass_plane_2d(
         seed_parameter_dict(y_seed) if y_seed is not None else seed_x_values
     )
 
-    # ---- 信号形状参数（峰位固定为一维结果） --------------------------------
+    # ---- 信号形状参数（由独立一维质量拟合标定） --------------------------
     def signal_shape_seeds(seed_values: Mapping[str, float], half_width: float):
         sigma_seed = float(
             np.clip(seed_values["sigma_narrow"], 0.1 * half_width, 0.5 * half_width)
@@ -782,7 +782,7 @@ def fit_mass_plane_2d(
     def make_signal_axis(
         seed_values: Mapping[str, float], half_width: float, suffix: str
     ):
-        """为一根轴创建共峰 double-Gaussian 的三个形状参数。"""
+        """为一根轴创建由一维标定固定的 double-Gaussian 参数。"""
         sigma_name, delta_name, fraction_name = (
             base + suffix
             for base in ("sigma_narrow", "delta_sigma", "narrow_frac")
@@ -792,16 +792,9 @@ def fit_mass_plane_2d(
             seed_values, half_width
         )
         parameters = [
-            zfit.Parameter(
-                f"{names[0]}_{uid}", sigma_seed, 0.1 * half_width, half_width
-            ),
-            zfit.Parameter(
-                f"{names[1]}_{uid}",
-                delta_seed,
-                0.02 * half_width,
-                2.0 * half_width,
-            ),
-            zfit.Parameter(f"{names[2]}_{uid}", fraction_seed, 0.30, 0.95),
+            zfit.Parameter(f"{names[0]}_{uid}", sigma_seed, floating=False),
+            zfit.Parameter(f"{names[1]}_{uid}", delta_seed, floating=False),
+            zfit.Parameter(f"{names[2]}_{uid}", fraction_seed, floating=False),
         ]
         return names, parameters
 
@@ -819,16 +812,56 @@ def fit_mass_plane_2d(
             seed_y_values, half_width_of(y_seed), "_y"
         )
 
-    # ---- 本底参数（SymbolFit 表达式，来自一维 seed，zfit profile） ---------
+    # ---- 本底参数（SymbolFit 曲线种子化 exp(Chebyshev-6)，zfit profile） ----
     background_model_x = x_seed.background_model
     background_model_y = (
         y_seed.background_model if y_seed is not None else background_model_x
     )
 
     def make_background_axis(
-        model: BackgroundModel, seed_values: Mapping[str, float], suffix: str
+        model: BackgroundModel,
+        seed_values: Mapping[str, float],
+        suffix: str,
+        mass_lo_value: float,
+        mass_hi_value: float,
     ):
-        """为本底表达式创建 zfit 参数；返回 (改名列表, TF 求值器, TF 参数表, 初值)。"""
+        """用 SymbolFit 曲线初始化正定、低阶且可 profile 的背景密度。"""
+        seed_mass = np.linspace(mass_lo_value, mass_hi_value, 257)
+        seed_density = model.evaluate_density(seed_mass, seed_values)
+        if not np.all(np.isfinite(seed_density)) or np.any(seed_density <= 0.0):
+            raise RuntimeError("SymbolFit 本底在二维拟合范围内非有限或非正")
+        scaled_mass = 2.0 * (
+            seed_mass - 0.5 * (mass_lo_value + mass_hi_value)
+        ) / (mass_hi_value - mass_lo_value)
+        chebyshev = np.polynomial.chebyshev.chebvander(scaled_mass, 6)[:, 1:]
+        log_density = np.log(seed_density)
+        initial, _, _, _ = np.linalg.lstsq(
+            chebyshev, log_density - np.mean(log_density), rcond=None
+        )
+        initial = np.clip(initial, -15.0, 15.0)
+        scaled_formula = (
+            f"({2.0 / (mass_hi_value - mass_lo_value):.17g}) * "
+            f"(x0 - ({0.5 * (mass_lo_value + mass_hi_value):.17g}))"
+        )
+        # 指数链接严格正定；六阶 Chebyshev 补足 loose 选择下的宽尺度曲率，
+        # signal-window harness 仍会拒绝局部振荡。
+        terms = (
+            scaled_formula,
+            f"2 * ({scaled_formula})**2 - 1",
+            f"4 * ({scaled_formula})**3 - 3 * ({scaled_formula})",
+            f"8 * ({scaled_formula})**4 - 8 * ({scaled_formula})**2 + 1",
+            f"16 * ({scaled_formula})**5 - 20 * ({scaled_formula})**3 + 5 * ({scaled_formula})",
+            f"32 * ({scaled_formula})**6 - 48 * ({scaled_formula})**4 + 18 * ({scaled_formula})**2 - 1",
+        )
+        names = [f"c{index}" for index in range(1, 7)]
+        model = BackgroundModel(
+            "exp(" + " + ".join(
+                f"{name} * ({term})" for name, term in zip(names, terms)
+            ) + ")",
+            names,
+            dict(zip(names, map(float, initial))),
+        )
+        seed_values = model.symbolfit_initial_values
         renamed = [f"{name}{suffix}" for name in model.parameter_names]
         tf_evaluator = _compile_expression(
             model.formula, model.parameter_names, tf.exp, tf.square
@@ -837,13 +870,17 @@ def fit_mass_plane_2d(
         initial_values = {}
         for original_name, name in zip(model.parameter_names, renamed):
             value = float(seed_values[original_name])
-            tf_params[original_name] = zfit.Parameter(f"{name}_{uid}", value)
+            tf_params[original_name] = zfit.Parameter(
+                f"{name}_{uid}", value, -20.0, 20.0
+            )
             initial_values[name] = value
-        return renamed, tf_evaluator, tf_params, initial_values
+        return model, renamed, tf_evaluator, tf_params, initial_values
 
     if shared_axes:
-        bg_names_x, bg_evaluator_x, bg_params_x, bg_initial_x = (
-            make_background_axis(background_model_x, seed_x_values, "")
+        background_model_x, bg_names_x, bg_evaluator_x, bg_params_x, bg_initial_x = (
+            make_background_axis(
+                background_model_x, seed_x_values, "", x_lo, x_hi
+            )
         )
         bg_names_y, bg_evaluator_y, bg_params_y, bg_initial_y = (
             bg_names_x,
@@ -853,11 +890,15 @@ def fit_mass_plane_2d(
         )
         background_model_y = background_model_x
     else:
-        bg_names_x, bg_evaluator_x, bg_params_x, bg_initial_x = (
-            make_background_axis(background_model_x, seed_x_values, "_x")
+        background_model_x, bg_names_x, bg_evaluator_x, bg_params_x, bg_initial_x = (
+            make_background_axis(
+                background_model_x, seed_x_values, "_x", x_lo, x_hi
+            )
         )
-        bg_names_y, bg_evaluator_y, bg_params_y, bg_initial_y = (
-            make_background_axis(background_model_y, seed_y_values, "_y")
+        background_model_y, bg_names_y, bg_evaluator_y, bg_params_y, bg_initial_y = (
+            make_background_axis(
+                background_model_y, seed_y_values, "_y", y_lo, y_hi
+            )
         )
 
     # ---- 产额参数（每时期每分量，非负） ------------------------------------
@@ -940,22 +981,18 @@ def fit_mass_plane_2d(
             total += tf.reduce_sum(mu - counts * tf.math.log(mu + 1.0e-10))
         return total
 
-    # 共享轴模式下 x/y 的形状与本底参数是同一组对象，只传入一次。
+    # 信号参数作为一维标定常数进入 NLL；只有本底和产额参与最小化。
     if shared_axes:
-        all_parameters = (
-            signal_parameters_x
-            + list(bg_params_x.values())
-            + yield_parameters
-        )
+        fixed_parameters = signal_parameters_x
+        floating_parameters = list(bg_params_x.values()) + yield_parameters
     else:
-        all_parameters = (
-            signal_parameters_x
-            + signal_parameters_y
-            + list(bg_params_x.values())
-            + list(bg_params_y.values())
-            + yield_parameters
+        fixed_parameters = signal_parameters_x + signal_parameters_y
+        floating_parameters = (
+            list(bg_params_x.values()) + list(bg_params_y.values()) + yield_parameters
         )
-    loss = zfit.loss.SimpleLoss(nll_func, all_parameters, errordef=0.5, jit=False)
+    loss = zfit.loss.SimpleLoss(
+        nll_func, floating_parameters, errordef=0.5, jit=False
+    )
     result = zfit.minimize.Minuit(
         tol=1.0e-3, mode=2, maxiter=10_000, verbosity=0
     ).minimize(loss)
@@ -966,15 +1003,16 @@ def fit_mass_plane_2d(
     def parameter_value(parameter):
         return float(np.asarray(parameter.value()))
 
-    all_values = [parameter_value(p) for p in all_parameters]
-    covariance = np.asarray(result.covariance(params=all_parameters), dtype=float)
-    if covariance.shape != (len(all_parameters),) * 2 or not np.all(
-        np.isfinite(covariance)
+    fixed_values = [parameter_value(p) for p in fixed_parameters]
+    floating_values = [parameter_value(p) for p in floating_parameters]
+    floating_covariance = np.asarray(
+        result.covariance(params=floating_parameters), dtype=float
+    )
+    if floating_covariance.shape != (len(floating_parameters),) * 2 or not np.all(
+        np.isfinite(floating_covariance)
     ):
         warnings.warn("zfit 返回的二维 covariance 无效，使用零矩阵", RuntimeWarning)
-        covariance = np.zeros(
-            (len(all_parameters),) * 2, dtype=float
-        )
+        floating_covariance = np.zeros((len(floating_parameters),) * 2, dtype=float)
         fit_converged = False
 
     # ---- 参数汇总（干净名字，顺序与 all_parameters 一致） ------------------
@@ -990,16 +1028,20 @@ def fit_mass_plane_2d(
             + bg_names_y
             + yield_parameter_names
         )
-    parameter_values = np.asarray(all_values, dtype=float)
+    parameter_values = np.asarray(fixed_values + floating_values, dtype=float)
+    covariance = np.zeros((len(parameter_values),) * 2, dtype=float)
+    covariance[
+        len(fixed_parameters) :, len(fixed_parameters) :
+    ] = floating_covariance
     nominal = dict(zip(parameter_names, parameter_values))
 
     component_yields = []
-    yield_start = len(all_values) - len(yield_parameters)
+    yield_start = len(parameter_values) - len(yield_parameters)
     index = 0
     for period in range(n_periods):
         per_component = {}
         for component in component_names:
-            per_component[component] = float(all_values[yield_start + index])
+            per_component[component] = float(parameter_values[yield_start + index])
             index += 1
         component_yields.append(per_component)
 
