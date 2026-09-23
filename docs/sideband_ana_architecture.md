@@ -11,8 +11,8 @@
 
 统计原理必须与以下参考实现一致：
 
-- `lambda-ana/scripts/pair_distributions/09_pair_jet_distribution_summary.py`；
-- `lambda-ana/scripts/lambda_lambda/shared/symbolfit_background_estimator.py`；
+- `/home/cheyuzhi/work/2025/delphi/analysis/lambda-ana/scripts/pair_distributions/09_pair_jet_distribution_summary.py`；
+- `/home/cheyuzhi/work/2025/delphi/analysis/lambda-ana/scripts/lambda_lambda/shared/symbolfit_background_estimator.py`；
 - 用户提供的 RooFit 二维四分量拟合与九区域容斥示例。
 
 新模块使用 SymbolFit 选择本底函数形式和初值，使用 zfit 完成最终参数估计。RooFit 示例仅作为四分量模型、区域积分和容斥公式的物理参考，不作为运行依赖。
@@ -252,10 +252,7 @@ $$
 - 信号和本底 shape 参数在时期之间共享；
 - 使用 simultaneous extended binned Poisson NLL；
 - ProductPDF 的 bin 积分可以利用一维积分的乘积计算，但必须与显式 ProductPDF 的归一化定义一致；
-- 二维本底沿用 `09` 已验证的稳定路径：由一维 SymbolFit 最优曲线拟合
-  `exp(Chebyshev-3)` 的初始 shape，随后由 zfit profile 三个 Chebyshev
-  系数。SymbolFit 曲线因此是二维本底初值的统计来源，而不是只用于画图；
-  一维名义路径则直接 profile SymbolFit 选出的解析式参数。
+- 二维本底使用 SymbolFit 选出的函数形式和初值，再由 zfit profile，而不是仅把 SymbolFit 曲线当作无关模型的视觉种子。
 
 `FitResult2D` 至少包含：
 
@@ -447,7 +444,6 @@ w_H
 w_V
 w_C
 weight_covariance
-weight_correlation
 parameter_gradient
 signal_leakage_by_region
 factorization_closure
@@ -592,7 +588,7 @@ write_fit_report_1d(
     sample_metadata,
     output_dir,
     stem,
-) -> ReportArtifacts
+) -> list[Path]
 ```
 
 ```python
@@ -603,7 +599,7 @@ write_fit_report_2d(
     sample_metadata,
     output_dir,
     stem,
-) -> ReportArtifacts
+) -> list[Path]
 ```
 
 ```python
@@ -613,7 +609,7 @@ write_transfer_summary(
     analysis_metadata,
     output_dir,
     stem="transfer_factors",
-) -> ReportArtifacts
+) -> list[Path]
 ```
 
 ### 9.1 一维拟合报告
@@ -859,27 +855,3 @@ DataFactory 仓库。
 - 超过二维的通用容斥系统。
 
 只有出现真实分析需求和可验证输入时再增加这些能力。
-
-## 14. 当前实现状态（2026-08-21）
-
-- Phase 1--3 已实现于 `datafactory/stat/sideband_ana/`；公共 API 由该目录
-  `__init__.py` 导出，现有 `datafactory/statistic.py` 未迁移。
-- 一维支持 SymbolFit 参数在 zfit 中 fixed/profiled 两条路径；二维支持相同
-  或不同质量轴、逐时期四分量 extended-Poisson zfit，以及单侧/双侧边带积分。
-- 固定测试包含 5 个纯数学断言、1 个 profiled-background zfit toy、1 个
-  四分量二维 zfit toy，以及真实 DELPHI fixture 的完整回归。
-- 正式 fixture 运行命令为：
-
-  ```sh
-  source /home/cheyuzhi/opt/miniconda3/etc/profile.d/conda.sh
-  conda activate root6.34
-  PYTHONPATH=. python tests/sideband_ana/run_fixture_analysis.py
-  ```
-
-- 正式回归结果位于
-  `tests/results/sideband_ana/ll_data_cat0_llbar/transfer_comparison.md`；$r$、
-  $w_H$、$w_V$、$w_C$ 均通过预先规定的
-  `max(3 sigma_reference, 1% |reference|)` 门槛。
-- Phase 4 中对 `09_pair_jet_distribution_summary.py` 的调用替换尚未执行；
-  当前真实 fixture runner 已完成同输入的迁移验证，待分析脚本显式切换后再删除
-  原脚本中的重复实现。

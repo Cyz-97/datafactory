@@ -1,60 +1,166 @@
-"""SymbolFit-seeded zfit models for one- and two-dimensional mass spectra.
+"""质量谱 / 质量平面拟合：SymbolFit 本底选择 + zfit 最终估计。
 
-SymbolFit is used only to select a smooth, non-negative background expression
-and its numerical starting point.  zfit performs the final parameter estimate.
-The one-dimensional fit can either profile the selected background parameters
-or keep their SymbolFit estimate fixed for compatibility studies.  The
-two-dimensional fit follows the four physical components used by the DELPHI
-analysis: ``SxSy``, ``BxSy``, ``SxBy``, and ``BxBy``.
+TensorFlow、zfit、PySR、SymbolFit 一律在拟合函数内部局部导入，导入本模块
+本身不需要任何拟合栈。本底解析式通过白名单 AST 转换器编译成 numpy（本模块
+内部使用）和 TensorFlow（zfit 损失函数使用）两种求值器。
+
+SymbolFit（PySR/Julia）在子进程中运行（见 ``_symbolfit_worker.py``）：
+Julia 的 LLVM 与 ROOT/libCling 的 LLVM 在同一进程内会发生
+``cl::opt`` 重复注册冲突（进程直接 abort），子进程隔离是唯一稳妥的共存
+方式。
 """
 
 from __future__ import annotations
 
-import ast
+import itertools
 import json
-import os
+import subprocess
+import sys
 import tempfile
+import warnings
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from scipy.special import erf
 
+from ._symbolfit import (
+    BackgroundModel,
+    _compile_expression,
+    _run_symbolfit_selection,
+)
 from .transfer import MassRegions1D
 
+__all__ = [
+    "BackgroundModel",
+    "NormalizedDensity1D",
+    "ComponentModel2D",
+    "FitResult1D",
+    "FitResult2D",
+    "fit_mass_spectrum_1d",
+    "fit_mass_plane_2d",
+]
 
-@dataclass(frozen=True)
-class SymbolFitBackgroundSeed:
-    """Selected symbolic background expression before the final zfit stage."""
-
-    parameterized_formula: str
-    fitted_formula: str
-    parameter_names: tuple[str, ...]
-    parameter_values: np.ndarray
-    parameter_covariance: np.ndarray
-    training_chi2: float
-    training_ndf: int
-    selection_score: float
+# 每次拟合生成唯一的 zfit 参数名后缀，避免同一进程内多次拟合重名。
+_FIT_COUNTER = itertools.count()
 
 
-@dataclass(frozen=True)
+# ---------------------------------------------------------------------------
+# 表达式白名单 AST 转换器
+# ---------------------------------------------------------------------------
+#
+# 支持的语法：数字常量、x0、参数符号 a1/a2/...、+ - *、**(非负整数次幂)、
+# exp()、square()。每个 ** 的指数必须是非负整数，且底数/指数内部不得再嵌
+# 套 **；exp() 的参数必须是 x0 的次数 <= 1 的多项式。其余节点立即报错。
+
+
+# ---------------------------------------------------------------------------
+# 数值求值模型（供 transfer / report / 测试使用）
+# ---------------------------------------------------------------------------
+
+
+def _gauss_legendre_points(mass_lo: float, mass_hi: float, n_points: int):
+    """返回 (积分节点, 积分权重)，节点已映射到 [mass_lo, mass_hi]。"""
+    nodes, weights = np.polynomial.legendre.leggauss(n_points)
+    points = 0.5 * (mass_lo + mass_hi) + 0.5 * (mass_hi - mass_lo) * nodes
+    mapped_weights = 0.5 * (mass_hi - mass_lo) * weights
+    return points, mapped_weights
+
+
+class NormalizedDensity1D:
+    """归一化到 [mass_lo, mass_hi] 的 1D 密度，可按任意参数值求值。
+
+    用于二维 transfer：``region_integral(interval, parameter_values)`` 返回
+    密度在该区间内的积分除以全区间积分（与显式 ProductPDF 的归一化定义一致）。
+    """
+
+    def __init__(
+        self,
+        mass_lo: float,
+        mass_hi: float,
+        parameter_names: list[str],
+        density_fn: Callable,
+        n_points: int = 64,
+    ):
+        self.mass_lo = float(mass_lo)
+        self.mass_hi = float(mass_hi)
+        self.parameter_names = [str(name) for name in parameter_names]
+        self._density_fn = density_fn
+        self.n_points = int(n_points)
+
+    def total_integral(self, parameter_values: Mapping[str, float]) -> float:
+        points, weights = _gauss_legendre_points(
+            self.mass_lo, self.mass_hi, self.n_points
+        )
+        values = np.asarray(
+            self._density_fn(points, parameter_values), dtype=float
+        )
+        return float(np.dot(weights, values))
+
+    def region_integral(
+        self,
+        interval: tuple[float, float],
+        parameter_values: Mapping[str, float],
+    ) -> float:
+        """密度在区间内的积分 / 全区间积分。"""
+        low, high = float(interval[0]), float(interval[1])
+        total = self.total_integral(parameter_values)
+        if total <= 0.0:
+            raise ValueError("NormalizedDensity1D: 全区间积分非正")
+        points, weights = _gauss_legendre_points(low, high, self.n_points)
+        values = np.asarray(
+            self._density_fn(points, parameter_values), dtype=float
+        )
+        return float(np.dot(weights, values) / total)
+
+
+def _double_gaussian_density(
+    mean: float, parameter_names: tuple[str, str, str]
+) -> Callable:
+    """固定共峰位的 double-Gaussian 密度。
+
+    ``parameter_names`` 是 (sigma_narrow, delta_sigma, narrow_frac) 三个参数
+    的实际名字；宽 Gauss 宽度为 sigma_narrow + delta_sigma。
+    """
+
+    def density(mass, params: Mapping[str, float]) -> np.ndarray:
+        mass_array = np.asarray(mass, dtype=float)
+        sigma_narrow = params[parameter_names[0]]
+        sigma_wide = sigma_narrow + params[parameter_names[1]]
+        narrow_frac = params[parameter_names[2]]
+        narrow = np.exp(
+            -0.5 * np.square((mass_array - mean) / sigma_narrow)
+        ) / (np.sqrt(2.0 * np.pi) * sigma_narrow)
+        wide = np.exp(
+            -0.5 * np.square((mass_array - mean) / sigma_wide)
+        ) / (np.sqrt(2.0 * np.pi) * sigma_wide)
+        return narrow_frac * narrow + (1.0 - narrow_frac) * wide
+
+    return density
+
+
+# ---------------------------------------------------------------------------
+# 拟合结果数据契约
+# ---------------------------------------------------------------------------
+
+
+@dataclass
 class FitResult1D:
-    """Complete binned one-dimensional Signal+Background fit product."""
+    """一维质量谱拟合结果。"""
 
     mass_edges: np.ndarray
     observed_counts: np.ndarray
     observed_variances: np.ndarray
     fit_range: tuple[float, float]
-    background_fit_range: tuple[float, float]
+    regions: MassRegions1D
     background_profiled: bool
-    parameter_names: tuple[str, ...]
+    parameter_names: list[str]
     parameter_values: np.ndarray
     parameter_covariance: np.ndarray
-    background_parameter_indices: tuple[int, ...]
     peak_mean: float
     peak_mean_variance: float
     background_formula: str
-    background_parameterized_formula: str
     symbolfit_initial_values: dict[str, float]
     model_counts: np.ndarray
     background_counts: np.ndarray
@@ -64,48 +170,31 @@ class FitResult1D:
     chi2: float
     ndf: int
     converged: bool
-    background_model: str
-
-    def evaluate_background(self, masses, parameter_values=None):
-        """Evaluate the fitted background density in events per mass unit."""
-        values = self.parameter_values if parameter_values is None else np.asarray(parameter_values, dtype=float)
-        background_parameters = {
-            name.split("background:", 1)[1]: values[index]
-            for name, index in zip(
-                (self.parameter_names[index] for index in self.background_parameter_indices),
-                self.background_parameter_indices,
-            )
-        }
-        evaluated = evaluate_symbolfit_expression(
-            self.background_parameterized_formula,
-            np.asarray(masses, dtype=float),
-            background_parameters,
-            np,
-        )
-        return np.full_like(np.asarray(masses, dtype=float), float(evaluated)) if np.ndim(evaluated) == 0 else evaluated
+    background_model: BackgroundModel
 
 
-@dataclass(frozen=True)
+@dataclass
+class ComponentModel2D:
+    """一个二维分量的两个归一化轴密度。"""
+
+    name: str
+    x_pdf: NormalizedDensity1D
+    y_pdf: NormalizedDensity1D
+
+
+@dataclass
 class FitResult2D:
-    """Four-component simultaneous extended-Poisson mass-plane fit product."""
+    """二维质量平面四分量拟合结果。"""
 
     x_edges: np.ndarray
     y_edges: np.ndarray
     observed_counts_by_period: np.ndarray
     model_counts_by_period: np.ndarray
-    component_names: tuple[str, ...]
-    component_yields_by_period: np.ndarray
-    parameter_names: tuple[str, ...]
+    component_names: list[str]
+    component_yields_by_period: list[dict[str, float]]
+    parameter_names: list[str]
     parameter_values: np.ndarray
     parameter_covariance: np.ndarray
-    x_signal_parameter_indices: tuple[int, int, int]
-    y_signal_parameter_indices: tuple[int, int, int]
-    x_background_parameter_indices: tuple[int, int, int]
-    y_background_parameter_indices: tuple[int, int, int]
-    x_peak_mean: float
-    y_peak_mean: float
-    x_fit_range: tuple[float, float]
-    y_fit_range: tuple[float, float]
     symbolfit_initial_values_x: dict[str, float]
     symbolfit_initial_values_y: dict[str, float]
     nll_value: float
@@ -115,286 +204,93 @@ class FitResult2D:
     x_projection_observed: np.ndarray
     x_projection_model: np.ndarray
     x_projection_background: np.ndarray
-    x_projection_dense_mass: np.ndarray
-    x_projection_dense_model: np.ndarray
-    x_projection_dense_background: np.ndarray
     y_projection_observed: np.ndarray
     y_projection_model: np.ndarray
     y_projection_background: np.ndarray
+    x_projection_dense_mass: np.ndarray
+    x_projection_dense_model: np.ndarray
+    x_projection_dense_background: np.ndarray
     y_projection_dense_mass: np.ndarray
     y_projection_dense_model: np.ndarray
     y_projection_dense_background: np.ndarray
-    component_models: tuple[str, ...]
-
-    def axis_region_integrals(self, axis: str, regions: MassRegions1D, parameter_values=None):
-        """Return normalized signal/background integrals for S, L, and H."""
-        values = self.parameter_values if parameter_values is None else np.asarray(parameter_values, dtype=float)
-        if axis == "x":
-            fit_range, mean = self.x_fit_range, self.x_peak_mean
-            signal_indices = self.x_signal_parameter_indices
-            background_indices = self.x_background_parameter_indices
-        elif axis == "y":
-            fit_range, mean = self.y_fit_range, self.y_peak_mean
-            signal_indices = self.y_signal_parameter_indices
-            background_indices = self.y_background_parameter_indices
-        else:
-            raise ValueError("axis must be 'x' or 'y'")
-        sigma_narrow, delta_sigma, narrow_fraction = values[list(signal_indices)]
-        background_coefficients = values[list(background_indices)]
-        intervals = {"S": regions.signal}
-        if regions.sideband_low is not None:
-            intervals["L"] = regions.sideband_low
-        if regions.sideband_high is not None:
-            intervals["H"] = regions.sideband_high
-        return {
-            "signal": {
-                label: _double_gaussian_integral(
-                    interval,
-                    fit_range,
-                    mean,
-                    sigma_narrow,
-                    delta_sigma,
-                    narrow_fraction,
-                )
-                for label, interval in intervals.items()
-            },
-            "background": {
-                label: _exp_chebyshev_integral(interval, fit_range, background_coefficients)
-                for label, interval in intervals.items()
-            },
-        }
+    component_models: list[ComponentModel2D]
+    x_background_formula: str = ""
+    y_background_formula: str = ""
 
 
-def _evaluate_ast(node, x, parameters, backend):
-    """Evaluate the strict SymbolFit expression subset for NumPy or TensorFlow."""
-    if isinstance(node, ast.Expression):
-        return _evaluate_ast(node.body, x, parameters, backend)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return float(node.value)
-    if isinstance(node, ast.Name):
-        if node.id == "x0":
-            return x
-        if node.id in parameters:
-            return parameters[node.id]
-        raise ValueError(f"unknown SymbolFit symbol {node.id!r}")
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-        value = _evaluate_ast(node.operand, x, parameters, backend)
-        return value if isinstance(node.op, ast.UAdd) else -value
-    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult)):
-        left = _evaluate_ast(node.left, x, parameters, backend)
-        right = _evaluate_ast(node.right, x, parameters, backend)
-        if isinstance(node.op, ast.Add):
-            return left + right
-        if isinstance(node.op, ast.Sub):
-            return left - right
-        return left * right
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
-        exponent = ast.literal_eval(node.right)
-        if not isinstance(exponent, int) or exponent < 0:
-            raise ValueError("SymbolFit powers must be non-negative integers")
-        return _evaluate_ast(node.left, x, parameters, backend) ** exponent
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 1:
-        value = _evaluate_ast(node.args[0], x, parameters, backend)
-        if node.func.id == "exp":
-            return backend.exp(value)
-        if node.func.id == "square":
-            return value * value
-    raise ValueError(f"unsupported SymbolFit expression node: {ast.dump(node)}")
+# ---------------------------------------------------------------------------
+# 6.1 SymbolFit 本底选择
+# ---------------------------------------------------------------------------
 
 
-def evaluate_symbolfit_expression(formula: str, x, parameters: dict[str, object], backend):
-    """Evaluate a formula containing only ``+ - * exp square`` and integer powers."""
-    tree = ast.parse(formula, mode="eval")
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Attribute, ast.Subscript, ast.Lambda, ast.Dict, ast.List, ast.Tuple)):
-            raise ValueError(f"unsupported SymbolFit syntax: {ast.dump(node)}")
-    return _evaluate_ast(tree, x, parameters, backend)
-
-
-def select_symbolfit_background(
-    mass_centers,
-    density,
-    density_errors,
+def _select_symbolfit_background(
     *,
-    fit_range: tuple[float, float],
-    excluded_interval: tuple[float, float],
+    centers: np.ndarray,
+    density: np.ndarray,
+    density_errors: np.ndarray,
+    training_mask: np.ndarray,
+    mass_lo: float,
+    mass_hi: float,
     random_seed: int,
-    output_dir: str | os.PathLike | None = None,
-    niterations: int = 100,
-) -> SymbolFitBackgroundSeed:
-    r"""Select the finite non-negative SymbolFit candidate with minimum $\chi^2+2k$."""
-    from pysr import PySRRegressor
-    import sympy
-    from symbolfit.symbolfit import SymbolFit
+    output_dir: Path | None,
+) -> tuple[BackgroundModel, np.ndarray]:
+    """在子进程中运行 SymbolFit 候选式搜索并返回最优本底模型。
 
-    centers = np.asarray(mass_centers, dtype=float)
-    values = np.asarray(density, dtype=float)
-    errors = np.asarray(density_errors, dtype=float)
-    fit_mask = (centers >= fit_range[0]) & (centers < fit_range[1])
-    excluded = (centers >= excluded_interval[0]) & (centers < excluded_interval[1])
-    training = fit_mask & ~excluded
-    if centers.ndim != 1 or centers.shape != values.shape or values.shape != errors.shape:
-        raise ValueError("SymbolFit centers, density, and errors must be same-shape 1-D arrays")
-    if np.count_nonzero(training) < 8 or np.any(errors[training] <= 0.0):
-        raise ValueError("SymbolFit requires at least eight training bins with positive uncertainty")
-    pysr_config = PySRRegressor(
-        model_selection="accuracy",
-        niterations=int(niterations),
-        maxsize=15,
-        binary_operators=["+", "-", "*"],
-        unary_operators=["exp", "square(x) = x*x"],
-        constraints={"exp": 5},
-        nested_constraints={"exp": {"exp": 0, "square": 0}, "square": {"square": 0}},
-        extra_sympy_mappings={"square": lambda value: value**2},
-        elementwise_loss="loss(y, y_pred, weights) = (y - y_pred)^2 * weights",
-    )
-    model = SymbolFit(
-        x=centers[training].reshape(-1, 1),
-        y=values[training].reshape(-1, 1),
-        y_up=errors[training].reshape(-1, 1),
-        y_down=errors[training].reshape(-1, 1),
-        pysr_config=pysr_config,
-        max_complexity=15,
-        input_rescale=True,
-        scale_y_by="mean",
-        max_stderr=20,
-        fit_y_unc=True,
-        random_seed=int(random_seed),
-    )
-    owned_temporary = None
-    if output_dir is None:
-        owned_temporary = tempfile.TemporaryDirectory(prefix="datafactory_symbolfit_")
-        output_path = Path(owned_temporary.name)
-    else:
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-    work_path = output_path / "symbolfit_work"
-    work_path.mkdir(parents=True, exist_ok=True)
-    original_directory = Path.cwd()
-    try:
-        os.chdir(work_path)
-        model.fit()
-    finally:
-        os.chdir(original_directory)
-    if model.func_candidates.empty:
-        raise RuntimeError("SymbolFit returned no background formula")
-
-    mass_symbol = sympy.symbols("x0")
-    dense_mass = np.linspace(fit_range[0], fit_range[1], 2000)
-    candidate_records = []
-    for _, candidate in model.func_candidates.iterrows():
-        parameterized = str(candidate["Parameterized equation, unscaled"])
-        fit_parameters = candidate["Parameters: (best-fit, +1, -1)"]
-        names = tuple(fit_parameters)
-        parameter_values = np.asarray([float(fit_parameters[name][0]) for name in names])
-        parameter_map = dict(zip(names, parameter_values))
-        try:
-            center_prediction = np.asarray(evaluate_symbolfit_expression(parameterized, centers, parameter_map, np), dtype=float)
-            dense_prediction = np.asarray(evaluate_symbolfit_expression(parameterized, dense_mass, parameter_map, np), dtype=float)
-            if center_prediction.ndim == 0:
-                center_prediction = np.full_like(centers, float(center_prediction))
-            if dense_prediction.ndim == 0:
-                dense_prediction = np.full_like(dense_mass, float(dense_prediction))
-            valid = np.all(np.isfinite(center_prediction)) and np.all(np.isfinite(dense_prediction)) and np.all(dense_prediction >= 0.0)
-        except (ValueError, TypeError, OverflowError):
-            valid = False
-            center_prediction = np.full_like(centers, np.nan)
-        chi2 = float(np.sum(np.square((values[training] - center_prediction[training]) / errors[training]))) if valid else np.inf
-        score = chi2 + 2.0 * float(candidate["Complexity"]) if valid else np.inf
-        candidate_records.append((score, chi2, parameterized, names, parameter_values, fit_parameters, candidate))
-    finite_candidates = [record for record in candidate_records if np.isfinite(record[0])]
-    if not finite_candidates:
-        raise RuntimeError("SymbolFit returned no finite non-negative supported formula")
-    score, chi2, parameterized, names, parameter_values, fit_parameters, candidate = min(finite_candidates, key=lambda record: record[0])
-    covariance = np.zeros((len(names), len(names)), dtype=float)
-    for index, name in enumerate(names):
-        covariance[index, index] = (0.5 * (abs(float(fit_parameters[name][1])) + abs(float(fit_parameters[name][2])))) ** 2
-    for name_pair, covariance_value in candidate["Covariance"].items():
-        first, second = (name.strip() for name in name_pair.split(","))
-        covariance[names.index(first), names.index(second)] = float(covariance_value)
-        covariance[names.index(second), names.index(first)] = float(covariance_value)
-    fitted_expression = sympy.sympify(parameterized, locals={"x0": mass_symbol}).subs(
-        {sympy.symbols(name): value for name, value in zip(names, parameter_values)}
-    )
-    if output_dir is not None:
-        model.func_candidates["Background selection score"] = [record[0] for record in candidate_records]
-        model.save_to_csv(output_dir=str(output_path))
-    if owned_temporary is not None:
-        owned_temporary.cleanup()
-    return SymbolFitBackgroundSeed(
-        parameterized_formula=parameterized,
-        fitted_formula=str(fitted_expression),
-        parameter_names=names,
-        parameter_values=parameter_values,
-        parameter_covariance=covariance,
-        training_chi2=chi2,
-        training_ndf=int(candidate["NDF"]),
-        selection_score=float(score),
-    )
-
-
-def _double_gaussian_bin_fractions(edges, fit_range, mean, sigma_narrow, delta_sigma, narrow_fraction, backend):
-    """Normalized double-Gaussian probability in each supplied mass bin."""
-    sqrt_two = np.sqrt(2.0)
-    sigma_wide = sigma_narrow + delta_sigma
-    erf_function = backend.math.erf if hasattr(backend, "math") else erf
-    narrow = 0.5 * (erf_function((edges[1:] - mean) / (sqrt_two * sigma_narrow)) - erf_function((edges[:-1] - mean) / (sqrt_two * sigma_narrow)))
-    wide = 0.5 * (erf_function((edges[1:] - mean) / (sqrt_two * sigma_wide)) - erf_function((edges[:-1] - mean) / (sqrt_two * sigma_wide)))
-    narrow_norm = 0.5 * (erf_function((fit_range[1] - mean) / (sqrt_two * sigma_narrow)) - erf_function((fit_range[0] - mean) / (sqrt_two * sigma_narrow)))
-    wide_norm = 0.5 * (erf_function((fit_range[1] - mean) / (sqrt_two * sigma_wide)) - erf_function((fit_range[0] - mean) / (sqrt_two * sigma_wide)))
-    return narrow_fraction * narrow / narrow_norm + (1.0 - narrow_fraction) * wide / wide_norm
-
-
-def _double_gaussian_integral(interval, fit_range, mean, sigma_narrow, delta_sigma, narrow_fraction):
-    """Return the normalized signal probability inside one physical interval.
-
-    The narrow and wide Gaussian fractions are integrated analytically through
-    their error functions, then normalized over the full fitted mass range.
-    This is the signal analogue of the background-region integral used by the
-    transfer-factor calculation.
+    返回 (BackgroundModel, 参数协方差)。
     """
-    return float(_double_gaussian_bin_fractions(np.asarray(interval), fit_range, mean, sigma_narrow, delta_sigma, narrow_fraction, np)[0])
+    config = {
+        "mass_lo": float(mass_lo),
+        "mass_hi": float(mass_hi),
+        "random_seed": int(random_seed),
+        "output_dir": str(output_dir) if output_dir is not None else None,
+    }
+    with tempfile.TemporaryDirectory(prefix="symbolfit_payload_") as tmp:
+        payload_path = Path(tmp) / "payload.npz"
+        result_path = Path(tmp) / "result.json"
+        np.savez(
+            payload_path,
+            centers=np.asarray(centers, dtype=float),
+            density=np.asarray(density, dtype=float),
+            density_errors=np.asarray(density_errors, dtype=float),
+            training_mask=np.asarray(training_mask, dtype=bool),
+            config_json=np.array(json.dumps(config)),
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "_symbolfit_worker.py"),
+                str(payload_path),
+                str(result_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+        if completed.returncode != 0 or not result_path.exists():
+            stdout_tail = completed.stdout[-2000:]
+            stderr_tail = completed.stderr[-2000:]
+            raise RuntimeError(
+                "SymbolFit 子进程失败 "
+                f"(returncode={completed.returncode}):\n"
+                f"stdout: {stdout_tail}\nstderr: {stderr_tail}"
+            )
+        result = json.loads(result_path.read_text())
+
+    if not result.get("ok"):
+        raise RuntimeError(f"SymbolFit 选择失败: {result.get('error')}")
+
+    background_model = BackgroundModel(
+        result["formula"],
+        result["parameter_names"],
+        result["initial_values"],
+    )
+    covariance = np.asarray(result["covariance"], dtype=float)
+    return background_model, covariance
 
 
-def _exp_chebyshev_integral(interval, fit_range, coefficients):
-    """Normalized exp(Chebyshev-3) integral used by the 2-D background."""
-    nodes, weights = np.polynomial.legendre.leggauss(48)
-    bounds = np.asarray((interval, fit_range), dtype=float)
-    widths = bounds[:, 1] - bounds[:, 0]
-    masses = 0.5 * (bounds[:, :1] + bounds[:, 1:]) + 0.5 * widths[:, None] * nodes[None, :]
-    scaled = 2.0 * (masses - fit_range[0]) / (fit_range[1] - fit_range[0]) - 1.0
-    basis = np.stack((scaled, 2.0 * scaled**2 - 1.0, 4.0 * scaled**3 - 3.0 * scaled))
-    raw_density = np.exp(np.tensordot(np.asarray(coefficients), basis, axes=(0, 0)))
-    integrals = 0.5 * widths * np.sum(weights[None, :] * raw_density, axis=1)
-    return float(integrals[0] / integrals[1])
-
-
-def _exp_chebyshev_density(masses, fit_range, coefficients):
-    """Evaluate the normalized exp(Chebyshev-3) background density."""
-    masses = np.asarray(masses, dtype=float)
-    scaled = 2.0 * (masses - fit_range[0]) / (fit_range[1] - fit_range[0]) - 1.0
-    basis = np.stack((scaled, 2.0 * scaled**2 - 1.0, 4.0 * scaled**3 - 3.0 * scaled))
-    raw = np.exp(np.asarray(coefficients) @ basis)
-    nodes, weights = np.polynomial.legendre.leggauss(64)
-    integration_mass = 0.5 * (fit_range[0] + fit_range[1]) + 0.5 * (fit_range[1] - fit_range[0]) * nodes
-    integration_scaled = 2.0 * (integration_mass - fit_range[0]) / (fit_range[1] - fit_range[0]) - 1.0
-    integration_basis = np.stack((integration_scaled, 2.0 * integration_scaled**2 - 1.0, 4.0 * integration_scaled**3 - 3.0 * integration_scaled))
-    raw_normalization = 0.5 * (fit_range[1] - fit_range[0]) * np.dot(weights, np.exp(np.asarray(coefficients) @ integration_basis))
-    return raw / raw_normalization
-
-
-def _validated_spectrum(edges, counts, variances):
-    """Validate a binned mass spectrum without changing its statistical content."""
-    edges = np.asarray(edges, dtype=float)
-    counts = np.asarray(counts, dtype=float)
-    variances = np.asarray(variances, dtype=float)
-    if edges.ndim != 1 or counts.ndim != 1 or variances.shape != counts.shape or edges.size != counts.size + 1:
-        raise ValueError("mass edges, counts, and variances have inconsistent one-dimensional shapes")
-    if not np.all(np.isfinite(edges)) or not np.all(np.diff(edges) > 0.0):
-        raise ValueError("mass edges must be finite and strictly increasing")
-    if not np.all(np.isfinite(counts)) or not np.all(np.isfinite(variances)) or np.any(variances < 0.0):
-        raise ValueError("mass counts/variances must be finite and variances non-negative")
-    return edges, counts, variances
+# ---------------------------------------------------------------------------
+# 6.2 一维质量谱拟合
+# ---------------------------------------------------------------------------
 
 
 def fit_mass_spectrum_1d(
@@ -405,150 +301,377 @@ def fit_mass_spectrum_1d(
     fit_range: tuple[float, float],
     regions: MassRegions1D,
     signal_model: str = "double_gaussian",
-    random_seed: int = 1,
+    random_seed: int = 0,
     profile_background: bool = True,
-    symbolfit_output_dir: str | os.PathLike | None = None,
-    symbolfit_niterations: int = 100,
+    symbolfit_output_dir: Path | str | None = None,
 ) -> FitResult1D:
-    """Fit a binned mass spectrum with a SymbolFit background and zfit peak."""
+    """拟合一维质量谱：SymbolFit 本底 + 共峰位 double-Gaussian 信号。
+
+    ``profile_background=True`` 时把 SymbolFit 表达式转换为可微 PDF，由 zfit
+    同时估计信号和本底参数；``False`` 时固定 SymbolFit 本底形状，仅拟合信号
+    （复现 09 脚本的一维路径）。损失为 chi2（误差取 max(sqrt(Sumw2), 1)）。
+    """
     if signal_model != "double_gaussian":
-        raise ValueError("the first sideband_ana release supports only signal_model='double_gaussian'")
-    edges, observed, observed_variances = _validated_spectrum(mass_edges, counts, variances)
-    if not (edges[0] <= fit_range[0] < fit_range[1] <= edges[-1]):
-        raise ValueError("fit_range must lie within mass_edges")
-    regions.validate_within((float(edges[0]), float(edges[-1])))
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    widths = np.diff(edges)
-    fit_mask = (centers >= fit_range[0]) & (centers < fit_range[1])
-    if np.count_nonzero(fit_mask) < 10 or observed[fit_mask].sum() <= 0.0:
-        raise ValueError("one-dimensional fit range is empty or too coarsely binned")
-    seed = select_symbolfit_background(
-        centers,
-        observed / widths,
-        np.sqrt(observed_variances) / widths,
-        fit_range=(float(edges[0]), float(edges[-1])),
-        excluded_interval=regions.signal,
+        raise NotImplementedError(
+            f"暂不支持信号模型 {signal_model}，当前只实现 double_gaussian"
+        )
+
+    mass_edges = np.asarray(mass_edges, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+    variances = np.asarray(variances, dtype=float)
+    n_bins = counts.size
+    if mass_edges.ndim != 1 or mass_edges.size != n_bins + 1:
+        raise ValueError(f"mass_edges 长度应为 {n_bins + 1}（counts 长度 + 1）")
+    if variances.shape != counts.shape:
+        raise ValueError("counts 与 variances 形状不一致")
+    if not np.all(np.isfinite(mass_edges)) or not np.all(np.isfinite(counts)):
+        raise ValueError("mass_edges / counts 含非有限值")
+    if np.any(variances < 0.0) or not np.all(np.isfinite(variances)):
+        raise ValueError("variances 必须为非负有限值")
+    if np.any(np.diff(mass_edges) <= 0.0):
+        raise ValueError("mass_edges 必须严格递增")
+
+    mass_lo, mass_hi = float(mass_edges[0]), float(mass_edges[-1])
+    fit_lo, fit_hi = float(fit_range[0]), float(fit_range[1])
+    if not (mass_lo <= fit_lo < fit_hi <= mass_hi):
+        raise ValueError(
+            f"fit_range ({fit_lo}, {fit_hi}) 必须位于质量范围 [{mass_lo}, {mass_hi}] 内"
+        )
+    regions.validate_within(mass_lo, mass_hi)
+    if regions.signal[0] < fit_lo or regions.signal[1] > fit_hi:
+        raise ValueError(
+            f"signal 区域 {regions.signal} 必须位于 fit_range ({fit_lo}, {fit_hi}) 内"
+        )
+
+    widths = np.diff(mass_edges)
+    centers = 0.5 * (mass_edges[:-1] + mass_edges[1:])
+    density = counts / widths
+    density_errors = np.sqrt(variances) / widths
+
+    signal_low, signal_high = regions.signal
+    training_mask = (centers < signal_low) | (centers >= signal_high)
+
+    output_dir = (
+        Path(symbolfit_output_dir) if symbolfit_output_dir is not None else None
+    )
+    background_model, background_covariance = _select_symbolfit_background(
+        centers=centers,
+        density=density,
+        density_errors=density_errors,
+        training_mask=training_mask,
+        mass_lo=mass_lo,
+        mass_hi=mass_hi,
         random_seed=random_seed,
-        output_dir=symbolfit_output_dir,
-        niterations=symbolfit_niterations,
+        output_dir=output_dir,
     )
 
+    # ---- zfit 最终拟合 -----------------------------------------------------
     import tensorflow as tf
     import zfit
 
     zfit.run.set_graph_mode(False)
     tf.config.run_functions_eagerly(True)
-    fit_edges = edges[np.r_[np.flatnonzero(fit_mask), np.flatnonzero(fit_mask)[-1] + 1]]
-    fit_counts = observed[fit_mask]
-    fit_errors = np.maximum(np.sqrt(observed_variances[fit_mask]), 1.0)
-    fit_widths = widths[fit_mask]
-    total_count = float(fit_counts.sum())
-    signal_parameters = [
-        zfit.Parameter("narrow_yield", 0.20 * total_count, 0.0, 2.0 * total_count),
-        zfit.Parameter("wide_yield", 0.10 * total_count, 0.0, 2.0 * total_count),
-        zfit.Parameter("mean", 0.5 * (regions.signal[0] + regions.signal[1]), regions.signal[0], regions.signal[1]),
-        zfit.Parameter("sigma_narrow", 0.0025, 0.0002, 0.020),
-        zfit.Parameter("delta_sigma", 0.0050, 0.0001, 0.030),
+
+    uid = next(_FIT_COUNTER)
+    total_count = float(np.sum(counts))
+    signal_half_width = 0.5 * (signal_high - signal_low)
+    signal_center = 0.5 * (signal_low + signal_high)
+
+    narrow_yield = zfit.Parameter(
+        f"narrow_yield_{uid}", 0.20 * total_count, 0.0, 2.0 * total_count
+    )
+    wide_yield = zfit.Parameter(
+        f"wide_yield_{uid}", 0.10 * total_count, 0.0, 2.0 * total_count
+    )
+    mean = zfit.Parameter(f"mean_{uid}", signal_center, signal_low, signal_high)
+    sigma_narrow = zfit.Parameter(
+        f"sigma_narrow_{uid}",
+        0.25 * signal_half_width,
+        0.05 * signal_half_width,
+        signal_half_width,
+    )
+    delta_sigma = zfit.Parameter(
+        f"delta_sigma_{uid}",
+        0.50 * signal_half_width,
+        0.02 * signal_half_width,
+        2.5 * signal_half_width,
+    )
+    signal_parameters = [narrow_yield, wide_yield, mean, sigma_narrow, delta_sigma]
+    signal_parameter_names = [
+        "narrow_yield",
+        "wide_yield",
+        "mean",
+        "sigma_narrow",
+        "delta_sigma",
     ]
+
+    background_tf_evaluator = _compile_expression(
+        background_model.formula,
+        background_model.parameter_names,
+        tf.exp,
+        tf.square,
+    )
     background_parameters = []
-    for index, (name, value) in enumerate(zip(seed.parameter_names, seed.parameter_values)):
-        sigma = np.sqrt(max(seed.parameter_covariance[index, index], 0.0))
-        half_span = max(10.0 * sigma, 0.5 * abs(value), 1.0e-6)
-        background_parameters.append(zfit.Parameter(f"background_{name}", value, value - half_span, value + half_span))
-    centers_tf = tf.constant(centers[fit_mask], dtype=tf.float64)
+    if profile_background:
+        # 本底参数作为 zfit 参数浮动，初值取 SymbolFit 结果。
+        background_tf_params = {}
+        for name in background_model.parameter_names:
+            parameter = zfit.Parameter(
+                f"{name}_{uid}", background_model.symbolfit_initial_values[name]
+            )
+            background_parameters.append(parameter)
+            background_tf_params[name] = parameter
+    else:
+        # 本底固定为 SymbolFit 曲线。
+        background_tf_params = {
+            name: tf.constant(
+                background_model.symbolfit_initial_values[name], dtype=tf.float64
+            )
+            for name in background_model.parameter_names
+        }
+
+    fit_mask = (centers >= fit_lo) & (centers < fit_hi)
+    fit_centers = centers[fit_mask]
+    fit_counts = counts[fit_mask]
+    fit_widths = widths[fit_mask]
+    fit_errors = np.maximum(np.sqrt(variances[fit_mask]), 1.0)
+    if fit_counts.size == 0:
+        raise ValueError("fit_range 内没有任何 bin")
+
+    centers_tf = tf.constant(fit_centers, dtype=tf.float64)
     counts_tf = tf.constant(fit_counts, dtype=tf.float64)
-    errors_tf = tf.constant(fit_errors, dtype=tf.float64)
     widths_tf = tf.constant(fit_widths, dtype=tf.float64)
-    norm = np.sqrt(2.0 * np.pi)
+    errors_tf = tf.constant(fit_errors, dtype=tf.float64)
+    norm = float(np.sqrt(2.0 * np.pi))
 
     def chi2_objective():
-        narrow_yield, wide_yield, mean, sigma_narrow, delta_sigma = signal_parameters
+        # 本底曲线必须在目标函数内部求值：profile 模式下它依赖 zfit 参数，
+        # 提前 eager 求值会把它冻结在初值上（参数不进入梯度）。
+        background_counts_tf = (
+            background_tf_evaluator(centers_tf, background_tf_params) * widths_tf
+        )
         sigma_wide = sigma_narrow + delta_sigma
-        narrow = narrow_yield * widths_tf / (norm * sigma_narrow) * tf.exp(-0.5 * tf.square((centers_tf - mean) / sigma_narrow))
-        wide = wide_yield * widths_tf / (norm * sigma_wide) * tf.exp(-0.5 * tf.square((centers_tf - mean) / sigma_wide))
-        parameter_map = {
-            name: parameter if profile_background else tf.constant(value, dtype=tf.float64)
-            for name, value, parameter in zip(seed.parameter_names, seed.parameter_values, background_parameters)
-        }
-        background_density = evaluate_symbolfit_expression(seed.parameterized_formula, centers_tf, parameter_map, tf)
-        if getattr(background_density, "shape", None) == ():
-            background_density = tf.ones_like(centers_tf) * background_density
-        model = narrow + wide + background_density * widths_tf
-        invalid_penalty = 1.0e12 * tf.reduce_sum(tf.nn.relu(-background_density) + tf.nn.relu(1.0e-12 - model))
-        objective = tf.reduce_sum(tf.square((counts_tf - model) / errors_tf)) + invalid_penalty
-        tf.debugging.assert_all_finite(objective, "non-finite 1-D Signal+Background objective")
+        narrow = (
+            narrow_yield
+            * widths_tf
+            / (norm * sigma_narrow)
+            * tf.exp(-0.5 * tf.square((centers_tf - mean) / sigma_narrow))
+        )
+        wide = (
+            wide_yield
+            * widths_tf
+            / (norm * sigma_wide)
+            * tf.exp(-0.5 * tf.square((centers_tf - mean) / sigma_wide))
+        )
+        residual = (counts_tf - narrow - wide - background_counts_tf) / errors_tf
+        objective = tf.reduce_sum(tf.square(residual))
+        tf.debugging.assert_all_finite(objective, "chi2 目标函数含非有限值")
         return objective
 
-    floating_parameters = signal_parameters + (background_parameters if profile_background else [])
-    loss = zfit.loss.SimpleLoss(chi2_objective, floating_parameters, errordef=1.0, jit=False)
-    result = zfit.minimize.Minuit(tol=1.0e-4, mode=2, maxiter=20_000, verbosity=0).minimize(loss)
-    if not result.converged or not result.valid:
-        raise RuntimeError(f"zfit one-dimensional fit did not converge: {result}")
-    fitted_signal = np.asarray([float(np.asarray(parameter.value())) for parameter in signal_parameters])
-    fitted_background = np.asarray([float(np.asarray(parameter.value())) for parameter in background_parameters]) if profile_background else seed.parameter_values.copy()
-    parameter_names = ("narrow_yield", "wide_yield", "mean", "sigma_narrow", "delta_sigma") + tuple(f"background:{name}" for name in seed.parameter_names)
-    parameter_values = np.concatenate((fitted_signal, fitted_background))
-    covariance = np.zeros((parameter_values.size, parameter_values.size), dtype=float)
-    floating_covariance = np.asarray(result.covariance(params=floating_parameters), dtype=float)
+    floating_parameters = signal_parameters + background_parameters
+    loss = zfit.loss.SimpleLoss(
+        chi2_objective, floating_parameters, errordef=1.0, jit=False
+    )
+    result = zfit.minimize.Minuit(
+        tol=1.0e-4, mode=2, maxiter=20_000, verbosity=0
+    ).minimize(loss)
+    fit_converged = bool(result.converged and result.valid)
+    if not fit_converged:
+        warnings.warn(f"zfit 一维拟合未收敛: {result}；返回当前参数值", RuntimeWarning)
+
+    def parameter_value(parameter):
+        return float(np.asarray(parameter.value()))
+
+    signal_values = [parameter_value(p) for p in signal_parameters]
+    signal_covariance = np.asarray(
+        result.covariance(params=signal_parameters), dtype=float
+    )
+    if signal_covariance.shape != (5, 5) or not np.all(
+        np.isfinite(signal_covariance)
+    ):
+        warnings.warn(
+            "zfit 返回的一维信号 covariance 无效，使用零矩阵", RuntimeWarning
+        )
+        signal_covariance = np.zeros((5, 5), dtype=float)
+        fit_converged = False
+
+    parameter_names = signal_parameter_names + list(background_model.parameter_names)
     if profile_background:
-        covariance[:, :] = floating_covariance
+        parameter_values = np.asarray(
+            signal_values + [parameter_value(p) for p in background_parameters],
+            dtype=float,
+        )
+        parameter_covariance = np.asarray(
+            result.covariance(params=floating_parameters), dtype=float
+        )
     else:
-        covariance[:5, :5] = floating_covariance
-        covariance[5:, 5:] = seed.parameter_covariance
-    background_indices = tuple(range(5, parameter_values.size))
-    background_map = dict(zip(seed.parameter_names, fitted_background))
-    background_density = np.asarray(evaluate_symbolfit_expression(seed.parameterized_formula, centers, background_map, np), dtype=float)
-    if background_density.ndim == 0:
-        background_density = np.full_like(centers, float(background_density))
-    background_counts = background_density * widths
-    narrow_yield, wide_yield, mean, sigma_narrow, delta_sigma = fitted_signal
-    signal_density = narrow_yield / (norm * sigma_narrow) * np.exp(-0.5 * ((centers - mean) / sigma_narrow) ** 2) + wide_yield / (norm * (sigma_narrow + delta_sigma)) * np.exp(-0.5 * ((centers - mean) / (sigma_narrow + delta_sigma)) ** 2)
-    model_counts = background_counts + signal_density * widths
-    representative_width = float(np.median(widths))
-    dense_mass = np.linspace(edges[0], edges[-1], 2000)
-    dense_background_density = np.asarray(evaluate_symbolfit_expression(seed.parameterized_formula, dense_mass, background_map, np), dtype=float)
-    if dense_background_density.ndim == 0:
-        dense_background_density = np.full_like(dense_mass, float(dense_background_density))
-    dense_signal_density = narrow_yield / (norm * sigma_narrow) * np.exp(-0.5 * ((dense_mass - mean) / sigma_narrow) ** 2) + wide_yield / (norm * (sigma_narrow + delta_sigma)) * np.exp(-0.5 * ((dense_mass - mean) / (sigma_narrow + delta_sigma)) ** 2)
-    chi2 = float(np.sum(np.square((observed[fit_mask] - model_counts[fit_mask]) / fit_errors)))
-    ndf = int(np.count_nonzero(fit_mask) - len(floating_parameters))
+        parameter_values = np.asarray(
+            signal_values
+            + [
+                background_model.symbolfit_initial_values[name]
+                for name in background_model.parameter_names
+            ],
+            dtype=float,
+        )
+        parameter_covariance = np.zeros(
+            (len(parameter_values), len(parameter_values)), dtype=float
+        )
+        signal_block = slice(0, 5)
+        background_block = slice(5, len(parameter_values))
+        parameter_covariance[signal_block, signal_block] = signal_covariance
+        parameter_covariance[background_block, background_block] = (
+            background_covariance
+        )
+    if (
+        parameter_covariance.shape != (len(parameter_values),) * 2
+        or not np.all(np.isfinite(parameter_covariance))
+    ):
+        warnings.warn("zfit 返回的一维 covariance 无效，使用零矩阵", RuntimeWarning)
+        parameter_covariance = np.zeros(
+            (len(parameter_values), len(parameter_values)), dtype=float
+        )
+        fit_converged = False
+
+    mean_index = parameter_names.index("mean")
+    peak_mean = float(parameter_values[mean_index])
+    peak_mean_variance = float(parameter_covariance[mean_index, mean_index])
+
+    # ---- 名义模型曲线（numpy，全谱 bin 中心 + 稠密采样） -------------------
+    nominal = dict(zip(parameter_names, parameter_values))
+    background_counts = background_model.evaluate_density(centers, nominal) * widths
+
+    def signal_density(masses):
+        mass_array = np.asarray(masses, dtype=float)
+        core_sigma = nominal["sigma_narrow"]
+        tail_sigma = nominal["sigma_narrow"] + nominal["delta_sigma"]
+        core = (
+            nominal["narrow_yield"]
+            / (np.sqrt(2.0 * np.pi) * core_sigma)
+            * np.exp(-0.5 * np.square((mass_array - peak_mean) / core_sigma))
+        )
+        tail = (
+            nominal["wide_yield"]
+            / (np.sqrt(2.0 * np.pi) * tail_sigma)
+            * np.exp(-0.5 * np.square((mass_array - peak_mean) / tail_sigma))
+        )
+        return core + tail
+
+    model_counts = background_counts + signal_density(centers) * widths
+    dense_mass = np.linspace(mass_lo, mass_hi, 2000)
+    average_width = (mass_hi - mass_lo) / n_bins
+    dense_background = (
+        background_model.evaluate_density(dense_mass, nominal) * average_width
+    )
+    dense_model = dense_background + signal_density(dense_mass) * average_width
+
+    chi2_value = float(
+        np.sum(np.square((fit_counts - model_counts[fit_mask]) / fit_errors))
+    )
+    ndf = int(fit_counts.size - len(floating_parameters))
     if ndf <= 0:
-        raise RuntimeError(f"one-dimensional fit has non-positive ndf={ndf}")
+        raise RuntimeError(f"一维拟合自由度非正 (ndf={ndf})")
+
     return FitResult1D(
-        mass_edges=edges,
-        observed_counts=observed,
-        observed_variances=observed_variances,
-        fit_range=fit_range,
-        background_fit_range=(float(edges[0]), float(edges[-1])),
-        background_profiled=profile_background,
+        mass_edges=mass_edges,
+        observed_counts=counts,
+        observed_variances=variances,
+        fit_range=(fit_lo, fit_hi),
+        regions=regions,
+        background_profiled=bool(profile_background),
         parameter_names=parameter_names,
         parameter_values=parameter_values,
-        parameter_covariance=covariance,
-        background_parameter_indices=background_indices,
-        peak_mean=float(mean),
-        peak_mean_variance=float(covariance[2, 2]),
-        background_formula=seed.fitted_formula,
-        background_parameterized_formula=seed.parameterized_formula,
-        symbolfit_initial_values=dict(zip(seed.parameter_names, seed.parameter_values)),
+        parameter_covariance=parameter_covariance,
+        peak_mean=peak_mean,
+        peak_mean_variance=peak_mean_variance,
+        background_formula=background_model.formula,
+        symbolfit_initial_values=dict(background_model.symbolfit_initial_values),
         model_counts=model_counts,
         background_counts=background_counts,
         dense_mass=dense_mass,
-        dense_model=(dense_background_density + dense_signal_density) * representative_width,
-        dense_background=dense_background_density * representative_width,
-        chi2=chi2,
+        dense_model=dense_model,
+        dense_background=dense_background,
+        chi2=chi2_value,
         ndf=ndf,
-        converged=True,
-        background_model="symbolfit_expression_profiled" if profile_background else "symbolfit_expression_fixed",
+        converged=fit_converged,
+        background_model=background_model,
     )
 
 
-def _rebin_mass_plane(counts_by_period, fit_nbins):
-    """Sum adjacent square mass bins while preserving per-period Poisson counts."""
-    n_periods, n_xbins, n_ybins = counts_by_period.shape
-    if n_xbins % fit_nbins != 0 or n_ybins % fit_nbins != 0:
-        raise ValueError("both mass-axis bin counts must be divisible by fit_nbins")
-    group_x, group_y = n_xbins // fit_nbins, n_ybins // fit_nbins
-    return counts_by_period.reshape(n_periods, fit_nbins, group_x, fit_nbins, group_y).sum(axis=(2, 4))
+# ---------------------------------------------------------------------------
+# 6.3 二维质量平面拟合
+# ---------------------------------------------------------------------------
+
+
+def _signal_axis_fractions_tf(
+    edges_tf,
+    mean_value: float,
+    sigma_narrow,
+    delta_sigma,
+    narrow_frac,
+    mass_lo: float,
+    mass_hi: float,
+    tf,
+):
+    """TF：共峰 double-Gaussian 在给定 bin 边缘上的归一化 bin 分数。"""
+    sqrt2 = float(np.sqrt(2.0))
+    sigma_wide = sigma_narrow + delta_sigma
+
+    def erf_difference(edges, sigma):
+        return tf.math.erf(
+            (edges[1:] - mean_value) / (sigma * sqrt2)
+        ) - tf.math.erf((edges[:-1] - mean_value) / (sigma * sqrt2))
+
+    erf_narrow = erf_difference(edges_tf, sigma_narrow)
+    erf_wide = erf_difference(edges_tf, sigma_wide)
+    erf_narrow_full = tf.math.erf(
+        (mass_hi - mean_value) / (sigma_narrow * sqrt2)
+    ) - tf.math.erf((mass_lo - mean_value) / (sigma_narrow * sqrt2))
+    erf_wide_full = tf.math.erf(
+        (mass_hi - mean_value) / (sigma_wide * sqrt2)
+    ) - tf.math.erf((mass_lo - mean_value) / (sigma_wide * sqrt2))
+    return (
+        narrow_frac * erf_narrow / erf_narrow_full
+        + (1.0 - narrow_frac) * erf_wide / erf_wide_full
+    )
+
+
+def _background_axis_fractions_tf(
+    edges: np.ndarray,
+    mass_lo: float,
+    mass_hi: float,
+    tf_evaluator: Callable,
+    tf_params: Mapping,
+    tf,
+    n_quad: int = 5,
+):
+    """TF：SymbolFit 表达式在各 bin 的归一化分数（逐 bin Gauss-Legendre）。"""
+    n_bins = edges.size - 1
+    bin_lo = edges[:-1]
+    bin_hi = edges[1:]
+    gl_nodes, gl_weights = np.polynomial.legendre.leggauss(n_quad)
+    quad_points = (
+        0.5 * (bin_lo + bin_hi)[:, None]
+        + 0.5 * (bin_hi - bin_lo)[:, None] * gl_nodes[None, :]
+    )
+    quad_weights = 0.5 * (bin_hi - bin_lo)[:, None] * gl_weights[None, :]
+    n_full = max(n_quad * n_bins, 60)
+    full_points, full_weights = _gauss_legendre_points(mass_lo, mass_hi, n_full)
+    quad_values = tf.reshape(
+        tf_evaluator(
+            tf.constant(quad_points.reshape(-1), dtype=tf.float64), tf_params
+        ),
+        (n_bins, n_quad),
+    )
+    bin_integrals = tf.reduce_sum(
+        tf.constant(quad_weights, dtype=tf.float64) * quad_values, axis=1
+    )
+    full_values = tf_evaluator(
+        tf.constant(full_points, dtype=tf.float64), tf_params
+    )
+    full_integral = tf.reduce_sum(
+        tf.constant(full_weights, dtype=tf.float64) * full_values
+    )
+    return bin_integrals / full_integral
 
 
 def fit_mass_plane_2d(
@@ -558,187 +681,638 @@ def fit_mass_plane_2d(
     *,
     x_seed: FitResult1D,
     y_seed: FitResult1D | None = None,
-    fit_nbins: int = 20,
-    random_seed: int = 1,
+    fit_nbins: int,
+    random_seed: int = 0,
 ) -> FitResult2D:
-    """Fit the four physical Signal/Background products to raw mass-plane counts."""
+    """拟合计数质量平面：SxSy / BxSy / SxBy / BxBy 四分量模型。
+
+    每个时期具有独立、非负的四分量产额；信号形状（共峰 double-Gaussian，
+    由一维结果标定）固定，本底形状参数跨时期共享并浮动。
+    ``y_seed=None`` 表示两轴共享同一套一维模型（要求两轴 binning 一致）。
+    损失为逐时期 extended Poisson binned NLL。
+    """
     x_edges = np.asarray(x_edges, dtype=float)
     y_edges = np.asarray(y_edges, dtype=float)
-    observed = np.asarray(counts_by_period, dtype=float)
-    if observed.ndim != 3 or observed.shape[0] == 0 or observed.shape[1:] != (x_edges.size - 1, y_edges.size - 1):
-        raise ValueError("counts_by_period must have shape (n_periods, n_xbins, n_ybins)")
-    if not np.all(np.isfinite(observed)) or np.any(observed < 0.0) or not np.allclose(observed, np.rint(observed), atol=1.0e-8):
-        raise ValueError("2-D zfit input must be finite, non-negative, unweighted Poisson counts")
-    if not np.all(np.diff(x_edges) > 0.0) or not np.all(np.diff(y_edges) > 0.0) or fit_nbins <= 0:
-        raise ValueError("mass-plane edges and fit_nbins are invalid")
-    same_axis_model = y_seed is None
-    y_seed = x_seed if y_seed is None else y_seed
-    planes = _rebin_mass_plane(observed, fit_nbins)
-    fit_x_edges = x_edges[:: (x_edges.size - 1) // fit_nbins]
-    fit_y_edges = y_edges[:: (y_edges.size - 1) // fit_nbins]
-    if fit_x_edges.size != fit_nbins + 1:
-        fit_x_edges = np.r_[fit_x_edges, x_edges[-1]]
-    if fit_y_edges.size != fit_nbins + 1:
-        fit_y_edges = np.r_[fit_y_edges, y_edges[-1]]
+    counts_by_period = np.asarray(counts_by_period, dtype=float)
+    shared_axes = y_seed is None
 
-    def chebyshev_seed(seed_result, axis_edges):
-        centers = 0.5 * (axis_edges[:-1] + axis_edges[1:])
-        density = np.maximum(seed_result.evaluate_background(centers), 1.0e-30)
-        scaled = 2.0 * (centers - axis_edges[0]) / (axis_edges[-1] - axis_edges[0]) - 1.0
-        basis = np.column_stack((scaled, 2.0 * scaled**2 - 1.0, 4.0 * scaled**3 - 3.0 * scaled))
-        return np.clip(np.linalg.lstsq(basis, np.log(density), rcond=None)[0], -15.0, 15.0)
+    if counts_by_period.ndim != 3:
+        raise ValueError("counts_by_period 形状应为 (n_periods, n_xbins, n_ybins)")
+    n_periods, n_xbins, n_ybins = counts_by_period.shape
+    if x_edges.size != n_xbins + 1 or y_edges.size != n_ybins + 1:
+        raise ValueError("x_edges / y_edges 长度与 counts_by_period 不匹配")
+    if not np.all(np.isfinite(counts_by_period)) or np.any(
+        counts_by_period < 0.0
+    ):
+        raise ValueError("counts_by_period 必须为非负有限值")
+    if np.any(np.diff(x_edges) <= 0.0) or np.any(np.diff(y_edges) <= 0.0):
+        raise ValueError("x_edges / y_edges 必须严格递增")
+    if shared_axes and not np.array_equal(x_edges, y_edges):
+        raise ValueError("两轴共享一维模型时 x_edges 与 y_edges 必须完全一致")
+    if n_xbins % fit_nbins != 0 or n_ybins % fit_nbins != 0:
+        raise ValueError(
+            f"fit_nbins={fit_nbins} 必须能整除两轴 bin 数 ({n_xbins}, {n_ybins})"
+        )
 
-    x_cheb_seed = chebyshev_seed(x_seed, x_edges)
-    y_cheb_seed = x_cheb_seed.copy() if same_axis_model else chebyshev_seed(y_seed, y_edges)
+    x_lo, x_hi = float(x_edges[0]), float(x_edges[-1])
+    y_lo, y_hi = float(y_edges[0]), float(y_edges[-1])
+    if not (x_lo <= x_seed.peak_mean <= x_hi):
+        raise ValueError("x_seed 的峰位不在 x 轴质量范围内")
+    if y_seed is not None and not (y_lo <= y_seed.peak_mean <= y_hi):
+        raise ValueError("y_seed 的峰位不在 y 轴质量范围内")
+
+    # 重分箱到拟合网格。
+    group_x = n_xbins // fit_nbins
+    group_y = n_ybins // fit_nbins
+    planes_fit = counts_by_period.reshape(
+        n_periods, fit_nbins, group_x, fit_nbins, group_y
+    ).sum(axis=(2, 4))
+    fit_edges_x = np.linspace(x_lo, x_hi, fit_nbins + 1)
+    fit_edges_y = np.linspace(y_lo, y_hi, fit_nbins + 1)
+
     import tensorflow as tf
     import zfit
+
     zfit.run.set_graph_mode(False)
     tf.config.run_functions_eagerly(True)
-    x_narrow_seed, x_wide_seed = x_seed.parameter_values[:2]
-    x_fraction_seed = float(np.clip(x_narrow_seed / max(x_narrow_seed + x_wide_seed, 1.0e-12), 0.30, 0.95))
-    x_shape = [
-        zfit.Parameter("x_sigma_narrow", float(np.clip(x_seed.parameter_values[3], 0.001, 0.005)), 0.0005, 0.010),
-        zfit.Parameter("x_delta_sigma", float(np.clip(x_seed.parameter_values[4], 0.0002, 0.015)), 0.0001, 0.025),
-        zfit.Parameter("x_narrow_fraction", x_fraction_seed, 0.20, 0.98),
-    ]
-    x_background = [zfit.Parameter(f"x_background_c{index + 1}", value, -20.0, 20.0) for index, value in enumerate(x_cheb_seed)]
-    if same_axis_model:
-        y_shape, y_background = x_shape, x_background
-    else:
-        y_narrow_seed, y_wide_seed = y_seed.parameter_values[:2]
-        y_fraction_seed = float(np.clip(y_narrow_seed / max(y_narrow_seed + y_wide_seed, 1.0e-12), 0.20, 0.98))
-        y_shape = [
-            zfit.Parameter("y_sigma_narrow", float(np.clip(y_seed.parameter_values[3], 0.0005, 0.010)), 0.0005, 0.010),
-            zfit.Parameter("y_delta_sigma", float(np.clip(y_seed.parameter_values[4], 0.0001, 0.025)), 0.0001, 0.025),
-            zfit.Parameter("y_narrow_fraction", y_fraction_seed, 0.20, 0.98),
-        ]
-        y_background = [zfit.Parameter(f"y_background_c{index + 1}", value, -20.0, 20.0) for index, value in enumerate(y_cheb_seed)]
-    shape_parameters = x_shape + x_background + ([] if same_axis_model else y_shape + y_background)
+
+    uid = next(_FIT_COUNTER)
     rng = np.random.RandomState(random_seed)
-    yield_parameters = []
-    for period in range(planes.shape[0]):
-        total = max(float(planes[period].sum()), 1.0)
-        for component in ("SxSy", "BxSy", "SxBy", "BxBy"):
-            yield_parameters.append(zfit.Parameter(f"yield_{component}_period{period}", total * 0.25 * (1.0 + 0.01 * rng.randn()), 0.0, 1.0e9))
-    all_parameters = shape_parameters + yield_parameters
-    x_edges_tf = tf.constant(fit_x_edges, dtype=tf.float64)
-    y_edges_tf = tf.constant(fit_y_edges, dtype=tf.float64)
-    observed_tf = tf.constant(planes, dtype=tf.float64)
-    quadrature_nodes, quadrature_weights = np.polynomial.legendre.leggauss(8)
 
-    def background_fractions(axis_edges, coefficients):
-        low, high = axis_edges[:-1], axis_edges[1:]
-        masses = 0.5 * (low + high)[:, None] + 0.5 * (high - low)[:, None] * quadrature_nodes
-        scaled = 2.0 * (masses - axis_edges[0]) / (axis_edges[-1] - axis_edges[0]) - 1.0
-        basis = np.stack((scaled, 2.0 * scaled**2 - 1.0, 4.0 * scaled**3 - 3.0 * scaled), axis=-1)
-        basis_tf = tf.constant(basis, dtype=tf.float64)
-        bin_weights_tf = tf.constant(0.5 * (high - low)[:, None] * quadrature_weights, dtype=tf.float64)
-        raw = tf.reduce_sum(bin_weights_tf * tf.exp(tf.linalg.matvec(basis_tf, tf.stack(coefficients))), axis=1)
-        return raw / tf.reduce_sum(raw)
-
-    x_background_fraction = lambda: background_fractions(fit_x_edges, x_background)
-    y_background_fraction = x_background_fraction if same_axis_model else lambda: background_fractions(fit_y_edges, y_background)
-    component_order = ("SxSy", "BxSy", "SxBy", "BxBy")
-
-    def poisson_nll():
-        x_signal_fraction = _double_gaussian_bin_fractions(x_edges_tf, (fit_x_edges[0], fit_x_edges[-1]), x_seed.peak_mean, *x_shape, tf)
-        y_signal_fraction = x_signal_fraction if same_axis_model else _double_gaussian_bin_fractions(y_edges_tf, (fit_y_edges[0], fit_y_edges[-1]), y_seed.peak_mean, *y_shape, tf)
-        x_background_values = x_background_fraction()
-        y_background_values = y_background_fraction()
-        total_nll = tf.constant(0.0, dtype=tf.float64)
-        for period in range(planes.shape[0]):
-            period_yields = yield_parameters[4 * period:4 * period + 4]
-            expectation = (
-                period_yields[0] * tf.einsum("i,j->ij", x_signal_fraction, y_signal_fraction)
-                + period_yields[1] * tf.einsum("i,j->ij", x_background_values, y_signal_fraction)
-                + period_yields[2] * tf.einsum("i,j->ij", x_signal_fraction, y_background_values)
-                + period_yields[3] * tf.einsum("i,j->ij", x_background_values, y_background_values)
+    def seed_parameter_dict(seed: FitResult1D) -> dict[str, float]:
+        return dict(
+            zip(
+                seed.parameter_names,
+                np.asarray(seed.parameter_values, dtype=float),
             )
-            total_nll += tf.reduce_sum(expectation - observed_tf[period] * tf.math.log(expectation + 1.0e-12))
-        tf.debugging.assert_all_finite(total_nll, "non-finite 2-D extended Poisson NLL")
-        return total_nll
+        )
 
-    loss = zfit.loss.SimpleLoss(poisson_nll, all_parameters, errordef=0.5, jit=False)
-    result = zfit.minimize.Minuit(tol=1.0e-3, mode=2, maxiter=20_000, verbosity=0).minimize(loss)
-    if not result.converged or not result.valid:
-        raise RuntimeError(f"zfit two-dimensional fit did not converge: {result}")
-    parameter_values = np.asarray([float(np.asarray(parameter.value())) for parameter in all_parameters])
-    covariance = np.asarray(result.covariance(params=all_parameters), dtype=float)
-    parameter_names = tuple(parameter.name for parameter in all_parameters)
-    x_signal_indices = tuple(parameter_names.index(parameter.name) for parameter in x_shape)
-    x_background_indices = tuple(parameter_names.index(parameter.name) for parameter in x_background)
-    y_signal_indices = x_signal_indices if same_axis_model else tuple(parameter_names.index(parameter.name) for parameter in y_shape)
-    y_background_indices = x_background_indices if same_axis_model else tuple(parameter_names.index(parameter.name) for parameter in y_background)
-    x_signal_fraction = np.asarray(_double_gaussian_bin_fractions(fit_x_edges, (fit_x_edges[0], fit_x_edges[-1]), x_seed.peak_mean, *parameter_values[list(x_signal_indices)], np))
-    y_signal_fraction = x_signal_fraction if same_axis_model else np.asarray(_double_gaussian_bin_fractions(fit_y_edges, (fit_y_edges[0], fit_y_edges[-1]), y_seed.peak_mean, *parameter_values[list(y_signal_indices)], np))
-    x_background_fraction_values = np.asarray([_exp_chebyshev_integral((fit_x_edges[index], fit_x_edges[index + 1]), (fit_x_edges[0], fit_x_edges[-1]), parameter_values[list(x_background_indices)]) for index in range(fit_nbins)])
-    y_background_fraction_values = x_background_fraction_values if same_axis_model else np.asarray([_exp_chebyshev_integral((fit_y_edges[index], fit_y_edges[index + 1]), (fit_y_edges[0], fit_y_edges[-1]), parameter_values[list(y_background_indices)]) for index in range(fit_nbins)])
-    fitted_yields = parameter_values[-4 * planes.shape[0]:].reshape(planes.shape[0], 4)
-    model = np.empty_like(planes)
-    background_model = np.empty_like(planes)
-    for period, period_yields in enumerate(fitted_yields):
-        components = np.stack((
-            period_yields[0] * np.outer(x_signal_fraction, y_signal_fraction),
-            period_yields[1] * np.outer(x_background_fraction_values, y_signal_fraction),
-            period_yields[2] * np.outer(x_signal_fraction, y_background_fraction_values),
-            period_yields[3] * np.outer(x_background_fraction_values, y_background_fraction_values),
-        ))
-        model[period] = components.sum(axis=0)
-        background_model[period] = components[1:].sum(axis=0)
-    dense_x = np.linspace(fit_x_edges[0], fit_x_edges[-1], 1000)
-    dense_y = np.linspace(fit_y_edges[0], fit_y_edges[-1], 1000)
-    x_sigma, x_delta, x_fraction = parameter_values[list(x_signal_indices)]
-    y_sigma, y_delta, y_fraction = parameter_values[list(y_signal_indices)]
-    x_narrow_norm = 0.5 * (erf((fit_x_edges[-1] - x_seed.peak_mean) / (np.sqrt(2.0) * x_sigma)) - erf((fit_x_edges[0] - x_seed.peak_mean) / (np.sqrt(2.0) * x_sigma)))
-    x_wide_norm = 0.5 * (erf((fit_x_edges[-1] - x_seed.peak_mean) / (np.sqrt(2.0) * (x_sigma + x_delta))) - erf((fit_x_edges[0] - x_seed.peak_mean) / (np.sqrt(2.0) * (x_sigma + x_delta))))
-    y_narrow_norm = 0.5 * (erf((fit_y_edges[-1] - y_seed.peak_mean) / (np.sqrt(2.0) * y_sigma)) - erf((fit_y_edges[0] - y_seed.peak_mean) / (np.sqrt(2.0) * y_sigma)))
-    y_wide_norm = 0.5 * (erf((fit_y_edges[-1] - y_seed.peak_mean) / (np.sqrt(2.0) * (y_sigma + y_delta))) - erf((fit_y_edges[0] - y_seed.peak_mean) / (np.sqrt(2.0) * (y_sigma + y_delta))))
-    x_signal_density = x_fraction * np.exp(-0.5 * ((dense_x - x_seed.peak_mean) / x_sigma) ** 2) / (np.sqrt(2.0 * np.pi) * x_sigma * x_narrow_norm) + (1.0 - x_fraction) * np.exp(-0.5 * ((dense_x - x_seed.peak_mean) / (x_sigma + x_delta)) ** 2) / (np.sqrt(2.0 * np.pi) * (x_sigma + x_delta) * x_wide_norm)
-    y_signal_density = y_fraction * np.exp(-0.5 * ((dense_y - y_seed.peak_mean) / y_sigma) ** 2) / (np.sqrt(2.0 * np.pi) * y_sigma * y_narrow_norm) + (1.0 - y_fraction) * np.exp(-0.5 * ((dense_y - y_seed.peak_mean) / (y_sigma + y_delta)) ** 2) / (np.sqrt(2.0 * np.pi) * (y_sigma + y_delta) * y_wide_norm)
-    x_background_density = _exp_chebyshev_density(dense_x, (fit_x_edges[0], fit_x_edges[-1]), parameter_values[list(x_background_indices)])
-    y_background_density = _exp_chebyshev_density(dense_y, (fit_y_edges[0], fit_y_edges[-1]), parameter_values[list(y_background_indices)])
-    summed_yields = fitted_yields.sum(axis=0)
-    x_bin_width = float(np.median(np.diff(fit_x_edges)))
-    y_bin_width = float(np.median(np.diff(fit_y_edges)))
-    x_dense_total = x_bin_width * ((summed_yields[0] + summed_yields[2]) * x_signal_density + (summed_yields[1] + summed_yields[3]) * x_background_density)
-    x_dense_background = x_bin_width * (summed_yields[2] * x_signal_density + (summed_yields[1] + summed_yields[3]) * x_background_density)
-    y_dense_total = y_bin_width * ((summed_yields[0] + summed_yields[1]) * y_signal_density + (summed_yields[2] + summed_yields[3]) * y_background_density)
-    y_dense_background = y_bin_width * (summed_yields[1] * y_signal_density + (summed_yields[2] + summed_yields[3]) * y_background_density)
+    seed_x_values = seed_parameter_dict(x_seed)
+    seed_y_values = (
+        seed_parameter_dict(y_seed) if y_seed is not None else seed_x_values
+    )
+
+    # ---- 信号形状参数（由独立一维质量拟合标定） --------------------------
+    def signal_shape_seeds(seed_values: Mapping[str, float], half_width: float):
+        sigma_seed = float(
+            np.clip(seed_values["sigma_narrow"], 0.1 * half_width, 0.5 * half_width)
+        )
+        delta_seed = float(
+            np.clip(
+                seed_values["delta_sigma"], 0.02 * half_width, 1.5 * half_width
+            )
+        )
+        fraction_seed = float(
+            np.clip(
+                seed_values["narrow_yield"]
+                / max(
+                    seed_values["narrow_yield"] + seed_values["wide_yield"],
+                    1.0e-12,
+                ),
+                0.31,
+                0.94,
+            )
+        )
+        return sigma_seed, delta_seed, fraction_seed
+
+    def half_width_of(seed: FitResult1D) -> float:
+        low, high = seed.regions.signal
+        return 0.5 * (high - low)
+
+    def make_signal_axis(
+        seed_values: Mapping[str, float], half_width: float, suffix: str
+    ):
+        """为一根轴创建由一维标定固定的 double-Gaussian 参数。"""
+        sigma_name, delta_name, fraction_name = (
+            base + suffix
+            for base in ("sigma_narrow", "delta_sigma", "narrow_frac")
+        )
+        names = (sigma_name, delta_name, fraction_name)
+        sigma_seed, delta_seed, fraction_seed = signal_shape_seeds(
+            seed_values, half_width
+        )
+        parameters = [
+            zfit.Parameter(f"{names[0]}_{uid}", sigma_seed, floating=False),
+            zfit.Parameter(f"{names[1]}_{uid}", delta_seed, floating=False),
+            zfit.Parameter(f"{names[2]}_{uid}", fraction_seed, floating=False),
+        ]
+        return names, parameters
+
+    if shared_axes:
+        signal_names_x, signal_parameters_x = make_signal_axis(
+            seed_x_values, half_width_of(x_seed), ""
+        )
+        signal_names_y = signal_names_x
+        signal_parameters_y = signal_parameters_x
+    else:
+        signal_names_x, signal_parameters_x = make_signal_axis(
+            seed_x_values, half_width_of(x_seed), "_x"
+        )
+        signal_names_y, signal_parameters_y = make_signal_axis(
+            seed_y_values, half_width_of(y_seed), "_y"
+        )
+
+    # ---- 本底参数（SymbolFit 曲线种子化 exp(Chebyshev-6)，zfit profile） ----
+    background_model_x = x_seed.background_model
+    background_model_y = (
+        y_seed.background_model if y_seed is not None else background_model_x
+    )
+
+    def make_background_axis(
+        model: BackgroundModel,
+        seed_values: Mapping[str, float],
+        suffix: str,
+        mass_lo_value: float,
+        mass_hi_value: float,
+    ):
+        """用 SymbolFit 曲线初始化正定、低阶且可 profile 的背景密度。"""
+        seed_mass = np.linspace(mass_lo_value, mass_hi_value, 257)
+        seed_density = model.evaluate_density(seed_mass, seed_values)
+        if not np.all(np.isfinite(seed_density)) or np.any(seed_density <= 0.0):
+            raise RuntimeError("SymbolFit 本底在二维拟合范围内非有限或非正")
+        scaled_mass = 2.0 * (
+            seed_mass - 0.5 * (mass_lo_value + mass_hi_value)
+        ) / (mass_hi_value - mass_lo_value)
+        chebyshev = np.polynomial.chebyshev.chebvander(scaled_mass, 6)[:, 1:]
+        log_density = np.log(seed_density)
+        initial, _, _, _ = np.linalg.lstsq(
+            chebyshev, log_density - np.mean(log_density), rcond=None
+        )
+        initial = np.clip(initial, -15.0, 15.0)
+        scaled_formula = (
+            f"({2.0 / (mass_hi_value - mass_lo_value):.17g}) * "
+            f"(x0 - ({0.5 * (mass_lo_value + mass_hi_value):.17g}))"
+        )
+        # 指数链接严格正定；六阶 Chebyshev 补足 loose 选择下的宽尺度曲率，
+        # signal-window harness 仍会拒绝局部振荡。
+        terms = (
+            scaled_formula,
+            f"2 * ({scaled_formula})**2 - 1",
+            f"4 * ({scaled_formula})**3 - 3 * ({scaled_formula})",
+            f"8 * ({scaled_formula})**4 - 8 * ({scaled_formula})**2 + 1",
+            f"16 * ({scaled_formula})**5 - 20 * ({scaled_formula})**3 + 5 * ({scaled_formula})",
+            f"32 * ({scaled_formula})**6 - 48 * ({scaled_formula})**4 + 18 * ({scaled_formula})**2 - 1",
+        )
+        names = [f"c{index}" for index in range(1, 7)]
+        model = BackgroundModel(
+            "exp(" + " + ".join(
+                f"{name} * ({term})" for name, term in zip(names, terms)
+            ) + ")",
+            names,
+            dict(zip(names, map(float, initial))),
+        )
+        seed_values = model.symbolfit_initial_values
+        renamed = [f"{name}{suffix}" for name in model.parameter_names]
+        tf_evaluator = _compile_expression(
+            model.formula, model.parameter_names, tf.exp, tf.square
+        )
+        tf_params = {}
+        initial_values = {}
+        for original_name, name in zip(model.parameter_names, renamed):
+            value = float(seed_values[original_name])
+            tf_params[original_name] = zfit.Parameter(
+                f"{name}_{uid}", value, -20.0, 20.0
+            )
+            initial_values[name] = value
+        return model, renamed, tf_evaluator, tf_params, initial_values
+
+    if shared_axes:
+        background_model_x, bg_names_x, bg_evaluator_x, bg_params_x, bg_initial_x = (
+            make_background_axis(
+                background_model_x, seed_x_values, "", x_lo, x_hi
+            )
+        )
+        bg_names_y, bg_evaluator_y, bg_params_y, bg_initial_y = (
+            bg_names_x,
+            bg_evaluator_x,
+            bg_params_x,
+            dict(bg_initial_x),
+        )
+        background_model_y = background_model_x
+    else:
+        background_model_x, bg_names_x, bg_evaluator_x, bg_params_x, bg_initial_x = (
+            make_background_axis(
+                background_model_x, seed_x_values, "_x", x_lo, x_hi
+            )
+        )
+        background_model_y, bg_names_y, bg_evaluator_y, bg_params_y, bg_initial_y = (
+            make_background_axis(
+                background_model_y, seed_y_values, "_y", y_lo, y_hi
+            )
+        )
+
+    # ---- 产额参数（每时期每分量，非负） ------------------------------------
+    component_names = ["SxSy", "BxSy", "SxBy", "BxBy"]
+    yield_parameter_names = []
+    yield_parameters = []
+    for period in range(n_periods):
+        total = max(float(np.sum(planes_fit[period])), 1.0)
+        for component in component_names:
+            name = f"N_{component}_p{period}"
+            parameter = zfit.Parameter(
+                f"{name}_{uid}",
+                float(total * 0.25 * (1.0 + 0.01 * rng.randn())),
+                0.0,
+                1.0e8,
+            )
+            yield_parameter_names.append(name)
+            yield_parameters.append(parameter)
+
+    # ---- TF bin 分数 --------------------------------------------------------
+    mean_x = float(x_seed.peak_mean)
+    mean_y = float(y_seed.peak_mean) if y_seed is not None else mean_x
+    edges_x_tf = tf.constant(fit_edges_x, dtype=tf.float64)
+    edges_y_tf = tf.constant(fit_edges_y, dtype=tf.float64)
+
+    # 共享轴模式下 x/y 参数本就是同一组对象，闭包无需区分。
+    sigma_narrow_x, delta_sigma_x, narrow_frac_x = signal_parameters_x
+    sigma_narrow_y, delta_sigma_y, narrow_frac_y = signal_parameters_y
+
+    def signal_fraction_x():
+        return _signal_axis_fractions_tf(
+            edges_x_tf, mean_x, sigma_narrow_x, delta_sigma_x, narrow_frac_x,
+            x_lo, x_hi, tf,
+        )
+
+    def signal_fraction_y():
+        return _signal_axis_fractions_tf(
+            edges_y_tf, mean_y, sigma_narrow_y, delta_sigma_y, narrow_frac_y,
+            y_lo, y_hi, tf,
+        )
+
+    def background_fraction_x():
+        return _background_axis_fractions_tf(
+            fit_edges_x, x_lo, x_hi, bg_evaluator_x, bg_params_x, tf
+        )
+
+    def background_fraction_y():
+        return _background_axis_fractions_tf(
+            fit_edges_y, y_lo, y_hi, bg_evaluator_y, bg_params_y, tf
+        )
+
+    observed_tf = [
+        tf.constant(planes_fit[period], dtype=tf.float64)
+        for period in range(n_periods)
+    ]
+    yield_lookup = {}
+    index = 0
+    for period in range(n_periods):
+        yield_lookup[period] = {}
+        for component in component_names:
+            yield_lookup[period][component] = yield_parameters[index]
+            index += 1
+
+    def nll_func():
+        """Extended Poisson binned NLL（差数据常数项）。"""
+        fx = signal_fraction_x()
+        bx = background_fraction_x()
+        fy = signal_fraction_y()
+        by = background_fraction_y()
+        total = tf.constant(0.0, dtype=tf.float64)
+        for period in range(n_periods):
+            yields = yield_lookup[period]
+            mu = (
+                yields["SxSy"].value() * tf.einsum("i,j->ij", fx, fy)
+                + yields["BxSy"].value() * tf.einsum("i,j->ij", bx, fy)
+                + yields["SxBy"].value() * tf.einsum("i,j->ij", fx, by)
+                + yields["BxBy"].value() * tf.einsum("i,j->ij", bx, by)
+            )
+            counts = observed_tf[period]
+            total += tf.reduce_sum(mu - counts * tf.math.log(mu + 1.0e-10))
+        return total
+
+    # 信号参数作为一维标定常数进入 NLL；只有本底和产额参与最小化。
+    if shared_axes:
+        fixed_parameters = signal_parameters_x
+        floating_parameters = list(bg_params_x.values()) + yield_parameters
+    else:
+        fixed_parameters = signal_parameters_x + signal_parameters_y
+        floating_parameters = (
+            list(bg_params_x.values()) + list(bg_params_y.values()) + yield_parameters
+        )
+    loss = zfit.loss.SimpleLoss(
+        nll_func, floating_parameters, errordef=0.5, jit=False
+    )
+    result = zfit.minimize.Minuit(
+        tol=1.0e-3, mode=2, maxiter=10_000, verbosity=0
+    ).minimize(loss)
+    fit_converged = bool(result.converged and result.valid)
+    if not fit_converged:
+        warnings.warn(f"zfit 二维拟合未收敛: {result}；返回当前参数值", RuntimeWarning)
+
+    def parameter_value(parameter):
+        return float(np.asarray(parameter.value()))
+
+    fixed_values = [parameter_value(p) for p in fixed_parameters]
+    floating_values = [parameter_value(p) for p in floating_parameters]
+    floating_covariance = np.asarray(
+        result.covariance(params=floating_parameters), dtype=float
+    )
+    if floating_covariance.shape != (len(floating_parameters),) * 2 or not np.all(
+        np.isfinite(floating_covariance)
+    ):
+        warnings.warn("zfit 返回的二维 covariance 无效，使用零矩阵", RuntimeWarning)
+        floating_covariance = np.zeros((len(floating_parameters),) * 2, dtype=float)
+        fit_converged = False
+
+    # ---- 参数汇总（干净名字，顺序与 all_parameters 一致） ------------------
+    if shared_axes:
+        parameter_names = (
+            list(signal_names_x) + bg_names_x + yield_parameter_names
+        )
+    else:
+        parameter_names = (
+            list(signal_names_x)
+            + list(signal_names_y)
+            + bg_names_x
+            + bg_names_y
+            + yield_parameter_names
+        )
+    parameter_values = np.asarray(fixed_values + floating_values, dtype=float)
+    covariance = np.zeros((len(parameter_values),) * 2, dtype=float)
+    covariance[
+        len(fixed_parameters) :, len(fixed_parameters) :
+    ] = floating_covariance
+    nominal = dict(zip(parameter_names, parameter_values))
+
+    component_yields = []
+    yield_start = len(parameter_values) - len(yield_parameters)
+    index = 0
+    for period in range(n_periods):
+        per_component = {}
+        for component in component_names:
+            per_component[component] = float(parameter_values[yield_start + index])
+            index += 1
+        component_yields.append(per_component)
+
+    # ---- 原始 binning 上的模型和投影（numpy 后验评估） ---------------------
+    def numpy_signal_fractions(
+        edges: np.ndarray,
+        mean_value: float,
+        names: tuple[str, str, str],
+        mass_lo_value: float,
+        mass_hi_value: float,
+    ) -> np.ndarray:
+        sigma_narrow_value = nominal[names[0]]
+        sigma_wide_value = sigma_narrow_value + nominal[names[1]]
+        fraction_value = nominal[names[2]]
+        sqrt2 = np.sqrt(2.0)
+
+        def erf_bin(sigma):
+            return erf((edges[1:] - mean_value) / (sigma * sqrt2)) - erf(
+                (edges[:-1] - mean_value) / (sigma * sqrt2)
+            )
+
+        def erf_full(sigma):
+            return erf((mass_hi_value - mean_value) / (sigma * sqrt2)) - erf(
+                (mass_lo_value - mean_value) / (sigma * sqrt2)
+            )
+
+        return (
+            fraction_value * erf_bin(sigma_narrow_value) / erf_full(sigma_narrow_value)
+            + (1.0 - fraction_value)
+            * erf_bin(sigma_wide_value)
+            / erf_full(sigma_wide_value)
+        )
+
+    def numpy_background_fractions(
+        edges: np.ndarray,
+        mass_lo_value: float,
+        mass_hi_value: float,
+        model: BackgroundModel,
+        renamed: list[str],
+    ) -> np.ndarray:
+        n_bins_local = edges.size - 1
+        bin_lo = edges[:-1]
+        bin_hi = edges[1:]
+        gl_nodes, gl_weights = np.polynomial.legendre.leggauss(5)
+        quad_points = (
+            0.5 * (bin_lo + bin_hi)[:, None]
+            + 0.5 * (bin_hi - bin_lo)[:, None] * gl_nodes[None, :]
+        )
+        quad_weights = 0.5 * (bin_hi - bin_lo)[:, None] * gl_weights[None, :]
+
+        def values_at(points):
+            params = {
+                original: nominal[name]
+                for original, name in zip(model.parameter_names, renamed)
+            }
+            result = np.asarray(
+                model._numpy_evaluator(np.asarray(points, dtype=float), params),
+                dtype=float,
+            )
+            if result.shape != np.shape(points):
+                result = np.broadcast_to(result, np.shape(points)).copy()
+            return result
+
+        quad_values = values_at(quad_points.reshape(-1)).reshape(n_bins_local, 5)
+        bin_integrals = np.sum(quad_weights * quad_values, axis=1)
+        full_points, full_weights = _gauss_legendre_points(
+            mass_lo_value, mass_hi_value, max(5 * n_bins_local, 60)
+        )
+        full_integral = float(np.dot(full_weights, values_at(full_points)))
+        return bin_integrals / full_integral
+
+    sig_frac_x = numpy_signal_fractions(x_edges, mean_x, signal_names_x, x_lo, x_hi)
+    sig_frac_y = numpy_signal_fractions(y_edges, mean_y, signal_names_y, y_lo, y_hi)
+    bg_frac_x = numpy_background_fractions(
+        x_edges, x_lo, x_hi, background_model_x, bg_names_x
+    )
+    bg_frac_y = numpy_background_fractions(
+        y_edges, y_lo, y_hi, background_model_y, bg_names_y
+    )
+
+    model_planes = np.zeros_like(counts_by_period)
+    for period in range(n_periods):
+        yields = component_yields[period]
+        model_planes[period] = (
+            yields["SxSy"] * np.outer(sig_frac_x, sig_frac_y)
+            + yields["BxSy"] * np.outer(bg_frac_x, sig_frac_y)
+            + yields["SxBy"] * np.outer(sig_frac_x, bg_frac_y)
+            + yields["BxBy"] * np.outer(bg_frac_x, bg_frac_y)
+        )
+
+    x_projection_observed = counts_by_period.sum(axis=2)
+    x_projection_model = model_planes.sum(axis=2)
+    x_projection_background = sum(
+        yields["BxSy"] + yields["BxBy"] for yields in component_yields
+    ) * bg_frac_x
+    y_projection_observed = counts_by_period.sum(axis=1)
+    y_projection_model = model_planes.sum(axis=1)
+    y_projection_background = sum(
+        yields["SxBy"] + yields["BxBy"] for yields in component_yields
+    ) * bg_frac_y
+
+    # ---- 稠密投影曲线（诊断图光滑绘制） -------------------------------------
+    # 曲线值 = [m−Δ/2, m+Δ/2] 内的期望计数（Δ 为平均原始 bin 宽），与逐 bin
+    # 期望同一定义：在原始 bin 中心处与投影数组一致，同时随 m 连续光滑。
+    def signal_axis_cdf(mass, mean_value, names, lo, hi):
+        sqrt2 = np.sqrt(2.0)
+        sigma_narrow_value = nominal[names[0]]
+        sigma_wide_value = sigma_narrow_value + nominal[names[1]]
+        fraction_value = nominal[names[2]]
+
+        def erf_growth(values, sigma):
+            return erf((values - mean_value) / (sigma * sqrt2)) - erf(
+                (lo - mean_value) / (sigma * sqrt2)
+            )
+
+        norm = fraction_value * erf_growth(hi, sigma_narrow_value) + (
+            1.0 - fraction_value
+        ) * erf_growth(hi, sigma_wide_value)
+        return (
+            fraction_value * erf_growth(mass, sigma_narrow_value)
+            + (1.0 - fraction_value) * erf_growth(mass, sigma_wide_value)
+        ) / norm
+
+    def background_axis_density(mass, model, renamed, lo, hi):
+        params = {
+            original: nominal[name]
+            for original, name in zip(model.parameter_names, renamed)
+        }
+        raw = np.asarray(model._numpy_evaluator(np.asarray(mass), params), dtype=float)
+        if raw.shape != np.shape(mass):
+            raw = np.broadcast_to(raw, np.shape(mass)).copy()
+        nodes, weights = _gauss_legendre_points(lo, hi, 256)
+        node_values = np.asarray(model._numpy_evaluator(nodes, params), dtype=float)
+        return raw / float(np.dot(weights, node_values))
+
+    def background_axis_cdf(mass, model, renamed, lo, hi):
+        grid = np.linspace(lo, hi, 4001)
+        density = background_axis_density(grid, model, renamed, lo, hi)
+        cdf = np.concatenate(
+            ([0.0], np.cumsum(0.5 * (density[1:] + density[:-1]) * np.diff(grid)))
+        )
+        return np.interp(mass, grid, cdf)
+
+    def axis_dense_curves(axis):
+        if axis == "x":
+            lo, hi, n_bins = x_lo, x_hi, n_xbins
+            mean_value, names = mean_x, signal_names_x
+            model_bg, renamed_bg = background_model_x, bg_names_x
+        else:
+            lo, hi, n_bins = y_lo, y_hi, n_ybins
+            mean_value, names = mean_y, signal_names_y
+            model_bg, renamed_bg = background_model_y, bg_names_y
+        # 曲线定义域收缩到 bin 中心范围：滑动半宽窗口必须完整落在拟合区间内。
+        step = 0.5 * (hi - lo) / n_bins
+        dense_mass = np.linspace(lo + step, hi - step, 2000)
+        edges_low = dense_mass - step
+        edges_high = dense_mass + step
+        signal_fraction = signal_axis_cdf(
+            edges_high, mean_value, names, lo, hi
+        ) - signal_axis_cdf(edges_low, mean_value, names, lo, hi)
+        background_fraction = background_axis_cdf(
+            edges_high, model_bg, renamed_bg, lo, hi
+        ) - background_axis_cdf(edges_low, model_bg, renamed_bg, lo, hi)
+        return (
+            dense_mass,
+            signal_total[axis] * signal_fraction
+            + background_total[axis] * background_fraction,
+            background_total[axis] * background_fraction,
+        )
+
+    signal_total = {
+        "x": sum(yields["SxSy"] + yields["SxBy"] for yields in component_yields),
+        "y": sum(yields["SxSy"] + yields["BxSy"] for yields in component_yields),
+    }
+    background_total = {
+        "x": sum(yields["BxSy"] + yields["BxBy"] for yields in component_yields),
+        "y": sum(yields["SxBy"] + yields["BxBy"] for yields in component_yields),
+    }
+    (
+        x_projection_dense_mass,
+        x_projection_dense_model,
+        x_projection_dense_background,
+    ) = axis_dense_curves("x")
+    (
+        y_projection_dense_mass,
+        y_projection_dense_model,
+        y_projection_dense_background,
+    ) = axis_dense_curves("y")
+
+    # ---- 分量模型（供 transfer 使用） ---------------------------------------
+    def make_signal_pdf(
+        mass_lo_value: float,
+        mass_hi_value: float,
+        names: tuple[str, str, str],
+        mean_value: float,
+    ) -> NormalizedDensity1D:
+        density = _double_gaussian_density(mean_value, names)
+        return NormalizedDensity1D(
+            mass_lo_value, mass_hi_value, list(names), density
+        )
+
+    def make_background_pdf(
+        model: BackgroundModel,
+        mass_lo_value: float,
+        mass_hi_value: float,
+        renamed: list[str],
+    ) -> NormalizedDensity1D:
+        original_names = model.parameter_names
+
+        def density(mass, params):
+            values = {
+                original: params[name]
+                for original, name in zip(original_names, renamed)
+            }
+            result = np.asarray(
+                model._numpy_evaluator(np.asarray(mass, dtype=float), values),
+                dtype=float,
+            )
+            if result.shape != np.shape(mass):
+                result = np.broadcast_to(result, np.shape(mass)).copy()
+            return result
+
+        return NormalizedDensity1D(
+            mass_lo_value, mass_hi_value, list(renamed), density
+        )
+
+    signal_pdf_x = make_signal_pdf(x_lo, x_hi, signal_names_x, mean_x)
+    signal_pdf_y = make_signal_pdf(y_lo, y_hi, signal_names_y, mean_y)
+    background_pdf_x = make_background_pdf(
+        background_model_x, x_lo, x_hi, bg_names_x
+    )
+    background_pdf_y = make_background_pdf(
+        background_model_y, y_lo, y_hi, bg_names_y
+    )
+
+    component_models = [
+        ComponentModel2D("SxSy", signal_pdf_x, signal_pdf_y),
+        ComponentModel2D("BxSy", background_pdf_x, signal_pdf_y),
+        ComponentModel2D("SxBy", signal_pdf_x, background_pdf_y),
+        ComponentModel2D("BxBy", background_pdf_x, background_pdf_y),
+    ]
+
     return FitResult2D(
-        x_edges=fit_x_edges,
-        y_edges=fit_y_edges,
-        observed_counts_by_period=planes,
-        model_counts_by_period=model,
-        component_names=component_order,
-        component_yields_by_period=fitted_yields,
+        x_edges=x_edges,
+        y_edges=y_edges,
+        observed_counts_by_period=counts_by_period,
+        model_counts_by_period=model_planes,
+        component_names=component_names,
+        component_yields_by_period=component_yields,
         parameter_names=parameter_names,
         parameter_values=parameter_values,
         parameter_covariance=covariance,
-        x_signal_parameter_indices=x_signal_indices,
-        y_signal_parameter_indices=y_signal_indices,
-        x_background_parameter_indices=x_background_indices,
-        y_background_parameter_indices=y_background_indices,
-        x_peak_mean=x_seed.peak_mean,
-        y_peak_mean=y_seed.peak_mean,
-        x_fit_range=(float(fit_x_edges[0]), float(fit_x_edges[-1])),
-        y_fit_range=(float(fit_y_edges[0]), float(fit_y_edges[-1])),
-        symbolfit_initial_values_x=x_seed.symbolfit_initial_values,
-        symbolfit_initial_values_y=y_seed.symbolfit_initial_values,
+        symbolfit_initial_values_x=dict(bg_initial_x),
+        symbolfit_initial_values_y=dict(bg_initial_y),
         nll_value=float(result.fmin),
-        fit_nbins=fit_nbins,
-        n_periods=planes.shape[0],
-        converged=True,
-        x_projection_observed=planes.sum(axis=(0, 2)),
-        x_projection_model=model.sum(axis=(0, 2)),
-        x_projection_background=background_model.sum(axis=(0, 2)),
-        x_projection_dense_mass=dense_x,
-        x_projection_dense_model=x_dense_total,
-        x_projection_dense_background=x_dense_background,
-        y_projection_observed=planes.sum(axis=(0, 1)),
-        y_projection_model=model.sum(axis=(0, 1)),
-        y_projection_background=background_model.sum(axis=(0, 1)),
-        y_projection_dense_mass=dense_y,
-        y_projection_dense_model=y_dense_total,
-        y_projection_dense_background=y_dense_background,
-        component_models=("S_x S_y", "B_x S_y", "S_x B_y", "B_x B_y"),
+        fit_nbins=int(fit_nbins),
+        n_periods=int(n_periods),
+        converged=fit_converged,
+        x_projection_observed=x_projection_observed,
+        x_projection_model=x_projection_model,
+        x_projection_background=x_projection_background,
+        y_projection_observed=y_projection_observed,
+        y_projection_model=y_projection_model,
+        y_projection_background=y_projection_background,
+        x_projection_dense_mass=x_projection_dense_mass,
+        x_projection_dense_model=x_projection_dense_model,
+        x_projection_dense_background=x_projection_dense_background,
+        y_projection_dense_mass=y_projection_dense_mass,
+        y_projection_dense_model=y_projection_dense_model,
+        y_projection_dense_background=y_projection_dense_background,
+        component_models=component_models,
+        x_background_formula=background_model_x.formula,
+        y_background_formula=background_model_y.formula,
     )

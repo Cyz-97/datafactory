@@ -303,7 +303,28 @@ def compare_hist1d(hist_a: HistStaff, hist_b: HistStaff, xlabel: str, **kargs):
 
         # 零线
         ax3.axhline(y=0, color='black', linestyle='-', lw=0.5)
-
+        # 添加箭头指示超出 ylim 范围的点
+        ratio_ylim = (0.2, 1.8)
+        for x, y, yerr in zip(x_a, ratio, ratio_err):
+            upper = y
+            lower = y
+            if upper > ratio_ylim[1]:
+                # 向上箭头，指示超过上界
+                ax2.annotate('', xy=(x, ratio_ylim[1]), xytext=(x, 1.2),
+                             arrowprops=dict(arrowstyle='simple',
+                                             color="blue",
+                                             lw=0.2, alpha=0.5,
+                                             mutation_scale=4),
+                             ha='center')
+            elif lower < ratio_ylim[0]:
+                # 向下箭头，指示低于下界
+                ax2.annotate('', xy=(x, ratio_ylim[0]*1.0), xytext=(x, 0.8),
+                             arrowprops=dict(arrowstyle='simple',
+                                             color="blue",
+                                             alpha=0.5,
+                                             lw=0.4,
+                                             mutation_scale=4),
+                             ha='center')
         # y 轴范围
         if diff_ylim is None:
             _max = _np.nanmax(_np.abs(diff)) if diff.size else 1.0

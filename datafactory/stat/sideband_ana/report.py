@@ -1,333 +1,802 @@
-"""Read-only diagnostic reports for sideband fits and transfer coefficients."""
+"""拟合与 transfer 的报告输出：PDF 图表 + Markdown/JSON 汇总。
+
+只依赖 matplotlib（Agg 后端）和本包的数据契约，不引入 ROOT。所有 PDF 写入
+Subject 元数据记录生成信息（caption、来源脚本、样本、选择、时间）。
+"""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
+import dataclasses
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+from matplotlib.patches import Rectangle
+from matplotlib.ticker import MaxNLocator
 
-from .fit import FitResult1D, FitResult2D
-from .transfer import TransferFactor1D, TransferFactors2D
+from .transfer import MassRegions1D, TransferFactor1D, TransferFactors2D
+
+__all__ = [
+    "write_fit_report_1d",
+    "write_fit_report_2d",
+    "write_transfer_summary",
+]
+
+_STYLE_PATH = Path(__file__).resolve().parents[2] / "style.mplstyle"
+
+_REGION_COLORS = {"S": "0.6", "L": "0.8", "H": "0.8"}
+_REGION_LABELS = {
+    "S": "signal",
+    "L": "low sideband",
+    "H": "high sideband",
+}
 
 
-@dataclass(frozen=True)
-class ReportArtifacts:
-    """Files and self-contained captions created by one report call."""
+def _import_matplotlib():
+    import matplotlib
 
-    files: tuple[Path, ...]
-    captions: dict[str, str]
-
-
-def _apply_datafactory_style():
-    """Load the exact style used by :mod:`datafactory.plot` without importing ROOT.
-
-    ``datafactory.plot`` imports PyROOT at module load time; keeping report
-    rendering ROOT-free prevents ROOT and PySR/Julia LLVM runtimes from being
-    loaded into the same fit worker process.
-    """
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    style_path = Path(__file__).resolve().parents[2] / "style.mplstyle"
-    if not style_path.is_file():
-        raise FileNotFoundError(f"DataFactory plotting style not found: {style_path}")
-    plt.style.use(style_path)
+
+    if _STYLE_PATH.exists():
+        plt.style.use(str(_STYLE_PATH))
+    return plt
 
 
-def _add_delphi_header(ax, metadata: dict, *, has_data: bool = True):
-    """Place the two-line DELPHI identity block and return its artists."""
-    state = "Open Data" if has_data else "Simulation"
-    delphi = ax.text(0.02, 0.97, "DELPHI", transform=ax.transAxes, ha="left", va="top", family="sans-serif", weight="bold", fontsize=11)
-    state_artist = ax.text(0.175, 0.97, state, transform=ax.transAxes, ha="left", va="top", fontsize=9)
+def _metadata(sample_metadata: Mapping, extra: str = "") -> dict:
     parts = []
-    if metadata.get("sqrt_s_gev") is not None:
-        parts.append(rf"\sqrt{{s}}={float(metadata['sqrt_s_gev']):g}\,\mathrm{{GeV}}")
-    if metadata.get("years"):
-        years = metadata["years"]
-        if isinstance(years, str):
-            year_text = years
-        elif len(years) == 1:
-            year_text = str(years[0])
-        else:
-            year_text = rf"{years[0]}\text{{--}}{years[-1]}"
-        parts.append(rf"\mathrm{{{year_text}}}")
-    if metadata.get("lumi_invpb") is not None:
-        parts.append(rf"\mathcal{{L}}={float(metadata['lumi_invpb']):g}\,\mathrm{{pb}}^{{-1}}")
-    metadata_artist = ax.text(0.02, 0.90, "$" + r",\ ".join(parts) + "$" if parts else "", transform=ax.transAxes, ha="left", va="top", fontsize=7)
-    return delphi, state_artist, metadata_artist
+    if extra:
+        parts.append(extra)
+    for key in ("caption", "sample", "selection", "source_script"):
+        if sample_metadata.get(key):
+            parts.append(f"{key}={sample_metadata[key]}")
+    parts.append(f"generated={datetime.now(timezone.utc).isoformat()}")
+    return {"Subject": "; ".join(parts)}
 
 
-def _save_figure(fig, output_stem: Path, caption: str, source: str):
-    """Save matching PDF/PNG diagnostics and embed an auditable PDF Subject."""
-    output_stem.parent.mkdir(parents=True, exist_ok=True)
-    pdf_path, png_path = output_stem.with_suffix(".pdf"), output_stem.with_suffix(".png")
-    fig.savefig(pdf_path, bbox_inches="tight", dpi=300, transparent=True, metadata={"Subject": f"{caption} Source: {source}", "Creator": source})
-    fig.savefig(png_path, bbox_inches="tight", dpi=300, transparent=True)
-    return pdf_path, png_path
+def _format_regions(regions: MassRegions1D) -> list[str]:
+    lines = []
+    for label, (low, high) in regions.region_intervals().items():
+        lines.append(
+            f"{_REGION_LABELS[label]} [{low:.6g}, {high:.6g}]"
+        )
+    return lines
 
 
-def _parameter_panel(names, values, covariance, chi2, ndf, *, maximum_parameters=10):
-    """Format fitted values with covariance-derived one-sigma uncertainties."""
-    errors = np.sqrt(np.maximum(np.diag(np.asarray(covariance, dtype=float)), 0.0))
-    lines = [rf"$\chi^2/\mathrm{{ndf}}={chi2:.1f}/{ndf}$"]
-    for name, value, error in zip(names[:maximum_parameters], values[:maximum_parameters], errors[:maximum_parameters]):
-        latex_name = name.replace("background:", "b_").replace("_", r"\_")
-        lines.append(rf"${latex_name}={value:.4g}\pm{error:.2g}$")
-    if len(names) > maximum_parameters:
-        lines.append(rf"$\text{{{len(names) - maximum_parameters} additional yield parameters in JSON}}$")
-    return "\n".join(lines)
+def _residual_axes_limits(residual: np.ndarray) -> tuple[float, float]:
+    """残差 y 范围关于 0 对称且不超出 (-5, 5)。"""
+    finite = residual[np.isfinite(residual)]
+    if finite.size:
+        magnitude = float(np.max(np.abs(finite)))
+    else:
+        magnitude = 1.0
+    limit = min(5.0, max(magnitude * 1.2, 0.2))
+    return (-limit, limit)
 
 
-def _fit_residual(observed, model):
-    """Calculate data/model minus one and a symmetric, bounded display range."""
-    residual = np.divide(observed, model, out=np.full_like(observed, np.nan, dtype=float), where=model > 0.0) - 1.0
-    finite = np.abs(residual[np.isfinite(residual)])
-    limit = min(5.0, max(0.5, 1.2 * float(np.percentile(finite, 95.0)) if finite.size else 0.5))
-    return residual, (-limit, limit)
+# ---------------------------------------------------------------------------
+# 9.1 一维拟合报告
+# ---------------------------------------------------------------------------
+
+_SIGNAL_LATEX_1D = {
+    "narrow_yield": r"$N_{\mathrm{narrow}}$",
+    "wide_yield": r"$N_{\mathrm{wide}}$",
+    "mean": r"$\mu$",
+    "sigma_narrow": r"$\sigma_{\mathrm{narrow}}$",
+    "delta_sigma": r"$\Delta\sigma$",
+}
 
 
 def write_fit_report_1d(
-    fit_result: FitResult1D,
-    transfer_result: TransferFactor1D,
+    fit_result,
+    transfer_result: TransferFactor1D | None,
     *,
-    sample_metadata: dict,
-    output_dir,
+    sample_metadata: Mapping,
+    output_dir: Path | str,
     stem: str,
-) -> ReportArtifacts:
-    """Write a full-range 1-D fit, residual, regions, and parameter panel."""
-    import matplotlib.pyplot as plt
+) -> list[Path]:
+    """输出一维质量谱拟合报告 PDF：主图 + 残差 + 参数面板。"""
+    plt = _import_matplotlib()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = output_dir / f"{stem}_fit1d.pdf"
 
-    _apply_datafactory_style()
     centers = 0.5 * (fit_result.mass_edges[:-1] + fit_result.mass_edges[1:])
-    errors = np.sqrt(fit_result.observed_variances)
-    residual, residual_range = _fit_residual(fit_result.observed_counts, fit_result.model_counts)
-    residual_error = np.divide(errors, fit_result.model_counts, out=np.zeros_like(errors), where=fit_result.model_counts > 0.0)
-    fig, (main_ax, residual_ax) = plt.subplots(2, 1, sharex=True, figsize=(6.0, 6.6), gridspec_kw={"height_ratios": (4, 1), "hspace": 0.08})
-    for interval in (transfer_result.regions.signal, transfer_result.regions.sideband_low, transfer_result.regions.sideband_high):
-        if interval is not None:
-            main_ax.axvspan(*interval, color="0.75", alpha=0.4, zorder=0)
-            residual_ax.axvspan(*interval, color="0.75", alpha=0.4, zorder=0)
-    marker_size, capsize = (1.6, 0.0) if centers.size > 80 else (3.0, 3.0)
-    main_ax.errorbar(centers, fit_result.observed_counts, yerr=errors, color="black", marker="o", markersize=marker_size, capsize=capsize, capthick=0.64, elinewidth=0.8, linestyle="", label=r"$\text{Data}$")
-    main_ax.plot(fit_result.dense_mass, fit_result.dense_model, color="black", linewidth=1.2, label=r"$\text{Total fit}$")
-    main_ax.plot(fit_result.dense_mass, fit_result.dense_background, color=plt.get_cmap("tab10").colors[0], linewidth=1.2, label=r"$\text{Background}$")
-    physical_maximum = float(np.nanmax(fit_result.observed_counts + errors))
-    main_ax.set_ylim(0.0, max(1.0, physical_maximum / 0.76))
-    main_ax.set_ylabel(r"$\text{Candidates / bin}$")
-    main_ax.set_box_aspect(3 / 4)
-    main_ax.grid(False)
-    _add_delphi_header(main_ax, sample_metadata, has_data=sample_metadata.get("sample", "data") == "data")
-    main_ax.legend(loc="upper right", fontsize=7, frameon=False)
-    panel = _parameter_panel(fit_result.parameter_names, fit_result.parameter_values, fit_result.parameter_covariance, fit_result.chi2, fit_result.ndf)
-    main_ax.text(0.02, 0.76, panel, transform=main_ax.transAxes, ha="left", va="top", fontsize=6, linespacing=1.05)
-    residual_ax.errorbar(centers, residual, yerr=residual_error, color="black", marker="o", markersize=marker_size, capsize=capsize, capthick=0.64, elinewidth=0.8, linestyle="")
-    residual_ax.axhline(0.0, color="black", linewidth=0.8)
-    residual_ax.set_ylim(*residual_range)
-    residual_ax.set_yticks(np.linspace(residual_range[0], residual_range[1], 5))
-    residual_ax.set_ylabel(r"$\frac{\mathrm{Data}}{\mathrm{model}}-1$")
-    residual_ax.set_xlabel(r"$m\,[\mathrm{GeV}]$")
-    residual_ax.grid(False)
-    fig.align_ylabels((main_ax, residual_ax))
-    caption = (
-        f"Binned mass spectrum for {sample_metadata.get('sample_label', sample_metadata.get('sample', 'the selected sample'))}. "
-        "Points show data with Sumw2 uncertainties; the black and blue curves are the final zfit total and SymbolFit-selected background models. "
-        f"Grey bands are the manually supplied signal and sideband intervals, and the lower panel is data/model minus one; the fitted background was {'profiled' if fit_result.background_profiled else 'fixed'} in zfit."
+    errors = np.sqrt(np.maximum(fit_result.observed_variances, 0.0))
+    model = fit_result.model_counts
+    valid_model = model > 0.0
+    residual = np.full_like(centers, np.nan, dtype=float)
+    residual[valid_model] = (
+        fit_result.observed_counts[valid_model] / model[valid_model] - 1.0
     )
-    paths = _save_figure(fig, Path(output_dir) / f"{stem}_fit1d", caption, "datafactory.stat.sideband_ana.report.write_fit_report_1d")
-    plt.close(fig)
-    return ReportArtifacts(files=paths, captions={f"{stem}_fit1d": caption})
+    residual_errors = np.full_like(centers, np.nan, dtype=float)
+    residual_errors[valid_model] = errors[valid_model] / model[valid_model]
+
+    figure = plt.figure(figsize=(11.0, 6.5))
+    grid = figure.add_gridspec(
+        2,
+        2,
+        width_ratios=[3.2, 1.4],
+        height_ratios=[3.0, 1.0],
+        hspace=0.08,
+        wspace=0.06,
+    )
+    main_ax = figure.add_subplot(grid[0, 0])
+    residual_ax = figure.add_subplot(grid[1, 0], sharex=main_ax)
+    text_ax = figure.add_subplot(grid[:, 1])
+    text_ax.axis("off")
+
+    main_ax.errorbar(
+        centers,
+        fit_result.observed_counts,
+        yerr=errors,
+        fmt=".",
+        color="black",
+        ms=3,
+        lw=0.8,
+        label="data",
+    )
+    main_ax.plot(
+        fit_result.dense_mass,
+        fit_result.dense_model,
+        color="black",
+        lw=0.9,
+        label="model",
+    )
+    main_ax.plot(
+        fit_result.dense_mass,
+        fit_result.dense_background,
+        color="royalblue",
+        lw=0.9,
+        label="background",
+    )
+    for label, (low, high) in fit_result.regions.region_intervals().items():
+        main_ax.axvspan(
+            low,
+            high,
+            color=_REGION_COLORS[label],
+            alpha=0.35,
+            lw=0,
+        )
+    main_ax.set_ylabel("candidates / bin")
+    main_ax.set_xlim(
+        float(fit_result.mass_edges[0]), float(fit_result.mass_edges[-1])
+    )
+    main_ax.legend(frameon=False, fontsize="small", loc="upper right")
+    caption = str(sample_metadata.get("caption", ""))
+    if caption:
+        main_ax.set_title(caption, fontsize="medium")
+
+    residual_ax.axhline(0.0, color="black", lw=0.6)
+    residual_ax.errorbar(
+        centers,
+        residual,
+        yerr=residual_errors,
+        fmt=".",
+        color="black",
+        ms=3,
+        lw=0.8,
+    )
+    lower, upper = _residual_axes_limits(residual)
+    residual_ax.set_ylim(lower, upper)
+    residual_ax.yaxis.set_major_locator(MaxNLocator(5))
+    residual_ax.set_xlabel(
+        r"$m_{p\pi^-}$ [GeV]" if not sample_metadata.get("x_label")
+        else str(sample_metadata["x_label"])
+    )
+    residual_ax.set_ylabel("data/model - 1")
+
+    # 参数面板。
+    lines = []
+    errors_vec = np.sqrt(np.clip(np.diag(fit_result.parameter_covariance), 0.0, None))
+    for index, name in enumerate(fit_result.parameter_names):
+        latex = _SIGNAL_LATEX_1D.get(name, rf"${name}$")
+        lines.append(
+            f"{latex} = {fit_result.parameter_values[index]:.4g} "
+            f"$\\pm$ {errors_vec[index]:.2g}"
+        )
+    lines.append("")
+    lines.append(
+        rf"$\chi^2/\mathrm{{ndf}} = {fit_result.chi2:.1f}/{fit_result.ndf}"
+        rf" = {fit_result.chi2 / max(fit_result.ndf, 1):.3g}$"
+    )
+    lines.append(
+        "background: "
+        + ("profiled by zfit" if fit_result.background_profiled else "fixed (SymbolFit)")
+    )
+    lines.append("")
+    lines.append("SymbolFit background:")
+    lines.append(
+        fit_result.background_model.formula.replace(
+            "x0", r"m"
+        )
+    )
+    for name, value in fit_result.symbolfit_initial_values.items():
+        lines.append(f"  {name} = {value:.6g}")
+    if transfer_result is not None:
+        lines.append("")
+        lines.append("transfer:")
+        lines.append(
+            f"  r = {transfer_result.r_combined:.4f} "
+            f"$\\pm$ {transfer_result.sigma_r_combined:.4f}"
+        )
+        lines.extend(f"  {line}" for line in _format_regions(transfer_result.regions))
+    text_ax.text(
+        0.0,
+        1.0,
+        "\n".join(lines),
+        va="top",
+        ha="left",
+        fontsize="small",
+        transform=text_ax.transAxes,
+    )
+
+    figure.savefig(
+        pdf_path,
+        metadata=_metadata(sample_metadata, extra=f"1D mass fit: {stem}"),
+    )
+    plt.close(figure)
+    return [pdf_path]
+
+
+# ---------------------------------------------------------------------------
+# 9.2 二维拟合报告
+# ---------------------------------------------------------------------------
+
+
+def _region_rectangles(
+    ax,
+    x_regions: MassRegions1D,
+    y_regions: MassRegions1D,
+):
+    """在平面上画 signal（红实线）和 sideband（蓝实线）区域矩形。"""
+    for x_label, (x_low, x_high) in x_regions.region_intervals().items():
+        for y_label, (y_low, y_high) in y_regions.region_intervals().items():
+            edge, lw, label = "red", 1.4, "signal"
+            if not (x_label == "S" and y_label == "S"):
+                edge, lw, label = "royalblue", 0.8, None
+            ax.add_patch(
+                Rectangle(
+                    (x_low, y_low),
+                    x_high - x_low,
+                    y_high - y_low,
+                    fill=False,
+                    edgecolor=edge,
+                    lw=lw,
+                    label=label if label else None,
+                )
+            )
+
+
+def _plane_panel(ax, x_centers, y_centers, values, title, vmin=None, vmax=None):
+    mesh = ax.pcolormesh(x_centers, y_centers, values, vmin=vmin, vmax=vmax)
+    ax.set_title(title, fontsize="small")
+    return mesh
 
 
 def write_fit_report_2d(
-    fit_result: FitResult2D,
-    transfer_result: TransferFactors2D,
+    fit_result,
+    transfer_result: TransferFactors2D | None,
     *,
-    sample_metadata: dict,
-    output_dir,
+    sample_metadata: Mapping,
+    output_dir: Path | str,
     stem: str,
-) -> ReportArtifacts:
-    """Write the mass plane plus x/y projection fit and residual diagnostics."""
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Rectangle
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    plane_figsize: tuple[float, float] = (11.5, 4.4),
+) -> list[Path]:
+    """输出二维质量平面拟合报告。
 
-    _apply_datafactory_style()
-    output_path = Path(output_dir)
-    observed_plane = fit_result.observed_counts_by_period.sum(axis=0)
-    model_plane = fit_result.model_counts_by_period.sum(axis=0)
-    plane_residual, _ = _fit_residual(observed_plane, model_plane)
-    fig, axes = plt.subplots(1, 3, figsize=(14.0, 6.2))
-    labels = (r"$\text{Observed}$", r"$\text{Model}$", r"$\mathrm{Data}/\mathrm{model}-1$")
-    values = (observed_plane, model_plane, plane_residual)
-    for axis, label, plane in zip(axes, labels, values):
-        mesh = axis.pcolormesh(fit_result.x_edges, fit_result.y_edges, plane.T, shading="auto", cmap="viridis" if label != labels[2] else "coolwarm")
-        divider = make_axes_locatable(axis)
-        colorbar_axis = divider.append_axes("right", size="4%", pad=0.08)
-        fig.colorbar(mesh, cax=colorbar_axis)
-        axis.set_aspect("equal")
-        axis.set_xlabel(r"$m_x\,[\mathrm{GeV}]$")
-        axis.set_ylabel(r"$m_y\,[\mathrm{GeV}]$")
-        axis.text(0.97, 0.03, label, transform=axis.transAxes, ha="right", va="bottom", fontsize=8, color="black", bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none"})
-        axis.grid(False)
-        x_intervals = {"S": transfer_result.x_regions.signal, "L": transfer_result.x_regions.sideband_low, "H": transfer_result.x_regions.sideband_high}
-        y_intervals = {"S": transfer_result.y_regions.signal, "L": transfer_result.y_regions.sideband_low, "H": transfer_result.y_regions.sideband_high}
-        for x_label, x_interval in x_intervals.items():
-            for y_label, y_interval in y_intervals.items():
-                if x_interval is None or y_interval is None:
-                    continue
-                color = plt.get_cmap("tab10").colors[3] if (x_label, y_label) == ("S", "S") else plt.get_cmap("tab10").colors[0]
-                axis.add_patch(Rectangle((x_interval[0], y_interval[0]), x_interval[1] - x_interval[0], y_interval[1] - y_interval[0], fill=False, edgecolor=color, linewidth=0.8))
-    state = "Open Data" if sample_metadata.get("sample", "data") == "data" else "Simulation"
-    years = sample_metadata.get("years", "")
-    year_text = years if isinstance(years, str) else (str(years[0]) if len(years) == 1 else rf"{years[0]}\text{{--}}{years[-1]}")
-    energy_text = "" if sample_metadata.get("sqrt_s_gev") is None else rf"$\sqrt{{s}}={float(sample_metadata['sqrt_s_gev']):g}\,\mathrm{{GeV}},\ \mathrm{{{year_text}}}$"
-    fig.text(0.04, 0.965, "DELPHI", ha="left", va="top", family="sans-serif", weight="bold", fontsize=11)
-    fig.text(0.13, 0.965, state, ha="left", va="top", fontsize=9)
-    fig.text(0.04, 0.925, energy_text, ha="left", va="top", fontsize=7)
-    valid = model_plane > 0.0
-    bc_terms = np.where(observed_plane[valid] > 0.0, observed_plane[valid] * np.log(observed_plane[valid] / model_plane[valid]), 0.0)
-    chi2 = float(2.0 * np.sum(bc_terms + model_plane[valid] - observed_plane[valid]))
-    ndf = int(np.count_nonzero(valid) - len(fit_result.parameter_names))
-    panel = _parameter_panel(fit_result.parameter_names, fit_result.parameter_values, fit_result.parameter_covariance, chi2, ndf, maximum_parameters=6)
-    panel_lines = panel.splitlines()
-    split_position = (len(panel_lines) + 1) // 2
-    fig.text(0.10, 0.035, "\n".join(panel_lines[:split_position]), ha="left", va="bottom", fontsize=7.0, linespacing=1.05)
-    fig.text(0.36, 0.035, "\n".join(panel_lines[split_position:]), ha="left", va="bottom", fontsize=7.0, linespacing=1.05)
-    fig.subplots_adjust(bottom=0.28, top=0.84, wspace=0.42)
-    plane_caption = (
-        f"Observed and fitted two-dimensional mass plane for {sample_metadata.get('sample_label', sample_metadata.get('sample', 'the selected sample'))}. "
-        "The model is the simultaneous extended-Poisson sum of SxSy, BxSy, SxBy, and BxBy; the third panel shows data/model minus one. "
-        "Red marks SS and blue marks every available low/high sideband atom used by the transfer calculation."
+    产出三个 PDF：平面三联图（observed/model 共用单个 colorbar，单页）、
+    各区域 data vs model 事例数柱状图（独立 PDF）、x 投影、y 投影。
+    拟合参数、区域积分表、w 代入式与区域事例数数值等文本信息以结构化
+    表格打印到 terminal，不写入 PDF。
+    """
+    plt = _import_matplotlib()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    x_label = str(sample_metadata.get("x_label", "x mass [GeV]"))
+    y_label = str(sample_metadata.get("y_label", "y mass [GeV]"))
+    same_quantity = (
+        sample_metadata.get("x_label") is not None
+        and sample_metadata.get("x_label") == sample_metadata.get("y_label")
     )
-    plane_paths = _save_figure(fig, output_path / f"{stem}_fit2d_plane", plane_caption, "datafactory.stat.sideband_ana.report.write_fit_report_2d")
-    plt.close(fig)
 
-    all_paths = list(plane_paths)
-    captions = {f"{stem}_fit2d_plane": plane_caption}
-    projection_data = (
-        ("x", fit_result.x_edges, fit_result.x_projection_observed, fit_result.x_projection_model, fit_result.x_projection_dense_mass, fit_result.x_projection_dense_model, fit_result.x_projection_dense_background),
-        ("y", fit_result.y_edges, fit_result.y_projection_observed, fit_result.y_projection_model, fit_result.y_projection_dense_mass, fit_result.y_projection_dense_model, fit_result.y_projection_dense_background),
-    )
-    for axis_name, edges, observed, model, dense_mass, dense_model, dense_background in projection_data:
-        centers = 0.5 * (edges[:-1] + edges[1:])
-        errors = np.sqrt(np.maximum(observed, 0.0))
-        residual, residual_range = _fit_residual(observed, model)
-        residual_error = np.divide(errors, model, out=np.zeros_like(errors), where=model > 0.0)
-        projection_fig, (main_ax, residual_ax) = plt.subplots(2, 1, sharex=True, figsize=(6.0, 6.6), gridspec_kw={"height_ratios": (4, 1), "hspace": 0.08})
-        main_ax.errorbar(centers, observed, yerr=errors, color="black", marker="o", markersize=3.0, capsize=3.0, capthick=0.64, elinewidth=0.8, linestyle="", label=r"$\text{Data}$")
-        main_ax.plot(dense_mass, dense_model, color="black", linewidth=1.2, label=r"$\text{Total fit}$")
-        main_ax.plot(dense_mass, dense_background, color=plt.get_cmap("tab10").colors[0], linewidth=1.2, label=r"$\text{Background}$")
-        physical_maximum = max(float(np.max(observed + errors)), float(np.max(dense_model)))
-        main_ax.set_ylim(0.0, max(1.0, physical_maximum / 0.72))
-        main_ax.set_ylabel(r"$\text{Candidates / bin}$")
-        main_ax.set_box_aspect(3 / 4)
-        main_ax.grid(False)
-        _add_delphi_header(main_ax, sample_metadata, has_data=sample_metadata.get("sample", "data") == "data")
-        main_ax.legend(loc="upper right", fontsize=7, frameon=False)
-        main_ax.text(0.02, 0.75, panel, transform=main_ax.transAxes, ha="left", va="top", fontsize=5.5, linespacing=1.0)
-        residual_ax.errorbar(centers, residual, yerr=residual_error, color="black", marker="o", markersize=3.0, capsize=3.0, capthick=0.64, elinewidth=0.8, linestyle="")
-        residual_ax.axhline(0.0, color="black", linewidth=0.8)
-        residual_ax.set_ylim(*residual_range)
-        residual_ax.set_yticks(np.linspace(residual_range[0], residual_range[1], 5))
-        residual_ax.set_ylabel(r"$\frac{\mathrm{Data}}{\mathrm{model}}-1$")
-        residual_ax.set_xlabel(rf"$m_{axis_name}\,[\mathrm{{GeV}}]$")
-        residual_ax.grid(False)
-        projection_fig.align_ylabels((main_ax, residual_ax))
-        projection_caption = (
-            f"{axis_name}-axis projection of the fitted two-dimensional mass plane. "
-            "Points have Poisson statistical uncertainties; black is the full four-component fit and blue is the sum of non-SxSy components. "
-            "The lower panel is data/model minus one."
+    observed = fit_result.observed_counts_by_period.sum(axis=0)
+    model = fit_result.model_counts_by_period.sum(axis=0)
+    valid = model > 0.0
+    ratio = np.full_like(model, np.nan, dtype=float)
+    ratio[valid] = observed[valid] / model[valid] - 1.0
+
+    x_edges = np.asarray(fit_result.x_edges, dtype=float)
+    y_edges = np.asarray(fit_result.y_edges, dtype=float)
+    x_bin_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_bin_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+    components = ["SxSy", "BxSy", "SxBy", "BxBy"]
+
+    # 各原子区域的 data bin-content 和与模型期望计数（产额 × 区域积分）。
+    # data 按 bin 中心点归入区域；模型积分用精确区域边界。
+    region_rows: list = []
+    if transfer_result is not None:
+        component_totals = {
+            name: sum(
+                yields[name]
+                for yields in fit_result.component_yields_by_period
+            )
+            for name in components
+        }
+        for key in transfer_result.atomic_region_integrals:
+            x_low, x_high = transfer_result.x_regions.region_intervals()[key[0]]
+            y_low, y_high = transfer_result.y_regions.region_intervals()[key[1]]
+            in_x = (x_bin_centers >= x_low) & (x_bin_centers < x_high)
+            in_y = (y_bin_centers >= y_low) & (y_bin_centers < y_high)
+            data_sum = float(observed[np.ix_(in_x, in_y)].sum())
+            model_sum = float(sum(
+                component_totals[name]
+                * transfer_result.atomic_region_integrals[key][name]
+                for name in components
+            ))
+            pull = (
+                (data_sum - model_sum) / np.sqrt(model_sum)
+                if model_sum > 0.0 else np.nan
+            )
+            region_rows.append((f"{key[0]}{key[1]}", data_sum, model_sum, pull))
+
+    # ---- 文本信息打印到 terminal（结构化表格，不写入 PDF） -------------------
+    tag = f"[write_fit_report_2d:{stem}]"
+
+    def _section(title: str) -> None:
+        print(f"\n{tag} ---- {title} " + "-" * max(0, 56 - len(title)))
+
+    _section("fit information")
+    print(f"{'periods':<26}: {fit_result.n_periods}")
+    print(f"{'fit bins':<26}: {fit_result.fit_nbins} x {fit_result.fit_nbins}")
+    print(f"{'NLL':<26}: {fit_result.nll_value:.2f}")
+
+    _section("component yields")
+    print(f"{'period':<10}" + "".join(f"{name:>14}" for name in components))
+    for period, yields in enumerate(fit_result.component_yields_by_period):
+        print(f"{'p' + str(period):<10}"
+              + "".join(f"{yields[name]:>14.0f}" for name in components))
+
+    _section("shape parameters")
+    errors_vec = np.sqrt(np.clip(np.diag(fit_result.parameter_covariance), 0.0, None))
+    print(f"{'name':<26}{'value':>14}{'error':>14}")
+    for index, name in enumerate(fit_result.parameter_names):
+        if name.startswith("N_"):
+            continue
+        print(f"{name:<26}{fit_result.parameter_values[index]:>14.4g}"
+              f"{errors_vec[index]:>14.2g}")
+
+    if transfer_result is not None:
+        _section("component integrals per atomic region")
+        print(f"{'region':<10}" + "".join(f"{name:>14}" for name in components))
+        for key, values in transfer_result.atomic_region_integrals.items():
+            print(f"{key[0] + key[1]:<10}"
+                  + "".join(f"{values[name]:>14.4g}" for name in components))
+
+        _section("aggregated region integrals")
+        print(f"{'component':<10}"
+              + "".join(f"{k:>14}" for k in ("SS", "BS", "SB", "BB")))
+        aggregated = transfer_result.aggregated_region_integrals
+        for component in components:
+            entries = aggregated[component]
+            print(f"{component:<10}"
+                  + "".join(f"{entries[k]:>14.4g}" for k in ("SS", "BS", "SB", "BB")))
+
+        _section("transfer coefficients")
+        sigma_w = np.sqrt(
+            np.clip(np.diag(transfer_result.weight_covariance), 0.0, None)
         )
-        projection_paths = _save_figure(projection_fig, output_path / f"{stem}_fit2d_projection_{axis_name}", projection_caption, "datafactory.stat.sideband_ana.report.write_fit_report_2d")
-        plt.close(projection_fig)
-        all_paths.extend(projection_paths)
-        captions[f"{stem}_fit2d_projection_{axis_name}"] = projection_caption
-    return ReportArtifacts(files=tuple(all_paths), captions=captions)
+        bxsy = aggregated["BxSy"]
+        sxby = aggregated["SxBy"]
+        bxby = aggregated["BxBy"]
+        print(f"  w_H = {bxsy['SS']:.4g} / {bxsy['BS']:.4g} "
+              f"= {transfer_result.w_H:.4f} ± {sigma_w[0]:.4f}")
+        print(f"  w_V = {sxby['SS']:.4g} / {sxby['SB']:.4g} "
+              f"= {transfer_result.w_V:.4f} ± {sigma_w[1]:.4f}")
+        print(f"  w_C = ({bxby['SS']:.4g} - w_H*{bxby['BS']:.4g} "
+              f"- w_V*{bxby['SB']:.4g}) / {bxby['BB']:.4g} "
+              f"= {transfer_result.w_C:.4f} ± {sigma_w[2]:.4f}")
+        print(f"  closure w_C + w_H*w_V = {transfer_result.factorization_closure:.4g}")
+
+        _section("signal leakage f_SxSy(R) / f_SxSy(SS)")
+        for key, value in transfer_result.signal_leakage_by_region.items():
+            print(f"  {key[0]}{key[1]}: {value:.4g}")
+
+    # ---- 平面三联图（单页 PDF；data/model 共享色标） ------------------------
+    plane_path = output_dir / f"{stem}_fit2d_plane.pdf"
+    paths.append(plane_path)
+    figure = plt.figure(figsize=plane_figsize)
+    grid = figure.add_gridspec(1, 3, wspace=0.55)
+    axes = [figure.add_subplot(grid[0, index]) for index in range(3)]
+    vmax_common = float(max(observed.max(), model.max()))
+    mesh_observed = _plane_panel(
+        axes[0], x_edges, y_edges, observed.T, "observed",
+        vmin=0.0, vmax=vmax_common,
+    )
+    mesh_model = _plane_panel(
+        axes[1], x_edges, y_edges, model.T, "model",
+        vmin=0.0, vmax=vmax_common,
+    )
+    mesh_ratio = _plane_panel(
+        axes[2], x_edges, y_edges, ratio.T, "observed/model - 1"
+    )
+    figure.colorbar(mesh_model, ax=axes[:2], shrink=0.9,
+                    label="candidates / bin")
+    figure.colorbar(mesh_ratio, ax=axes[2], shrink=0.9)
+    for ax in axes:
+        ax.set_box_aspect(1)
+        if same_quantity:
+            ax.set_aspect("equal")
+        # 刻度规范: 质量量级禁止 \times 10^n + m 偏移格式
+        ax.ticklabel_format(axis="both", style="plain", useOffset=False)
+        ax.set_xlabel(x_label, fontsize="small")
+        ax.set_ylabel(y_label, fontsize="small")
+    if transfer_result is not None:
+        for ax in axes:
+            _region_rectangles(ax, transfer_result.x_regions, transfer_result.y_regions)
+        # 区域事例数标注：observed 面板标 data，model 面板标模型期望。
+        label_style = dict(
+            color="white", ha="center", va="center", fontsize="x-small",
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.45, ec="none"),
+        )
+        for row, key in zip(region_rows, transfer_result.atomic_region_integrals):
+            x_low, x_high = transfer_result.x_regions.region_intervals()[key[0]]
+            y_low, y_high = transfer_result.y_regions.region_intervals()[key[1]]
+            center_x = 0.5 * (x_low + x_high)
+            center_y = 0.5 * (y_low + y_high)
+            axes[0].text(center_x, center_y, f"{row[1]:,.0f}", **label_style)
+            axes[1].text(center_x, center_y, f"{row[2]:,.0f}", **label_style)
+    caption = str(sample_metadata.get("caption", ""))
+    if caption:
+        figure.suptitle(caption, fontsize="medium")
+    figure.savefig(
+        plane_path,
+        metadata=_metadata(sample_metadata, extra=f"2D mass-plane fit: {stem}"),
+    )
+    plt.close(figure)
+
+    # ---- 区域事例数对比：数值表打印到 terminal，柱状图为独立 PDF ------------
+    if region_rows:
+        _section("region content: data vs model")
+        print(f"{'region':<10}{'data':>14}{'model':>14}{'pull':>10}")
+        for label, data_sum, model_sum, pull in region_rows:
+            pull_text = f"{pull:+.2f}" if np.isfinite(pull) else "n/a"
+            print(f"{label:<10}{data_sum:>14.0f}{model_sum:>14.0f}{pull_text:>10}")
+        print("  (data: bins assigned by center; model: yields x region integrals)")
+
+        region_path = output_dir / f"{stem}_fit2d_region_content.pdf"
+        paths.append(region_path)
+        figure = plt.figure(figsize=(7.0, 4.8))
+        ax_bars = figure.add_subplot(1, 1, 1)
+        positions = np.arange(len(region_rows))
+        bar_width = 0.38
+        data_values = np.asarray([row[1] for row in region_rows])
+        model_values = np.asarray([row[2] for row in region_rows])
+        ax_bars.bar(
+            positions - 0.5 * bar_width, data_values, width=bar_width,
+            color="black", yerr=np.sqrt(np.maximum(data_values, 0.0)),
+            error_kw={"lw": 0.9, "capsize": 3}, label="data",
+        )
+        ax_bars.bar(
+            positions + 0.5 * bar_width, model_values, width=bar_width,
+            color="royalblue", label="model",
+        )
+        for position, row in zip(positions, region_rows):
+            if np.isfinite(row[3]):
+                ax_bars.text(
+                    position, max(row[1], row[2]), f"pull={row[3]:+.1f}",
+                    ha="center", va="bottom", fontsize="x-small",
+                )
+        ax_bars.set_xticks(positions, [row[0] for row in region_rows])
+        ax_bars.set_ylabel("candidates in region")
+        ax_bars.legend(frameon=False, fontsize="small")
+        ax_bars.set_title(
+            "region content: data (bin centers) vs model (region integrals)",
+            fontsize="small",
+        )
+        figure.tight_layout()
+        figure.savefig(
+            region_path,
+            metadata=_metadata(sample_metadata, extra=f"2D fit region content: {stem}"),
+        )
+        plt.close(figure)
+
+    # 投影图（x 和 y）。observed/model 带 period 轴 (n_periods, n_bins)，
+    # background 已经是 period 求和后的 1D，只有 ndim==2 时才压缩。
+    def _projection_total(array):
+        array = np.asarray(array)
+        return array.sum(axis=0) if array.ndim == 2 else array
+
+    projections = (
+        ("x", _projection_total(fit_result.x_projection_observed),
+         _projection_total(fit_result.x_projection_model),
+         fit_result.x_projection_dense_mass,
+         fit_result.x_projection_dense_model,
+         fit_result.x_projection_dense_background,
+         x_bin_centers, x_label),
+        ("y", _projection_total(fit_result.y_projection_observed),
+         _projection_total(fit_result.y_projection_model),
+         fit_result.y_projection_dense_mass,
+         fit_result.y_projection_dense_model,
+         fit_result.y_projection_dense_background,
+         y_bin_centers, y_label),
+    )
+    for axis_name, observed_proj, model_proj, dense_mass, dense_model, dense_background, bin_centers, axis_label in projections:
+        figure = plt.figure(figsize=(7.5, 6.0))
+        grid = figure.add_gridspec(2, 1, height_ratios=[3.0, 1.0], hspace=0.08)
+        main_ax = figure.add_subplot(grid[0])
+        residual_ax = figure.add_subplot(grid[1], sharex=main_ax)
+
+        observed_errors = np.sqrt(np.maximum(observed_proj, 0.0))
+        main_ax.errorbar(
+            bin_centers,
+            observed_proj,
+            yerr=observed_errors,
+            fmt=".",
+            color="black",
+            ms=3,
+            lw=0.8,
+            label="data",
+        )
+        main_ax.plot(dense_mass, dense_model, color="black", lw=0.9, label="model")
+        main_ax.plot(
+            dense_mass, dense_background, color="royalblue", lw=0.9,
+            label="background",
+        )
+        if transfer_result is not None:
+            regions_for_axis = (
+                transfer_result.x_regions
+                if axis_name == "x"
+                else transfer_result.y_regions
+            )
+            for label, (low, high) in regions_for_axis.region_intervals().items():
+                main_ax.axvspan(
+                    low, high, color=_REGION_COLORS[label], alpha=0.35, lw=0
+                )
+        main_ax.set_ylabel(f"candidates / bin ({axis_name} projection)")
+        main_ax.legend(frameon=False, fontsize="small", loc="upper right")
+        caption = str(sample_metadata.get("caption", ""))
+        if caption:
+            main_ax.set_title(f"{caption} — {axis_name} projection", fontsize="medium")
+
+        valid_proj = model_proj > 0.0
+        residual_proj = np.full_like(model_proj, np.nan, dtype=float)
+        residual_proj[valid_proj] = (
+            observed_proj[valid_proj] / model_proj[valid_proj] - 1.0
+        )
+        residual_proj_errors = np.full_like(model_proj, np.nan, dtype=float)
+        residual_proj_errors[valid_proj] = (
+            observed_errors[valid_proj] / model_proj[valid_proj]
+        )
+        residual_ax.axhline(0.0, color="black", lw=0.6)
+        residual_ax.errorbar(
+            bin_centers,
+            residual_proj,
+            yerr=residual_proj_errors,
+            fmt=".",
+            color="black",
+            ms=3,
+            lw=0.8,
+        )
+        lower, upper = _residual_axes_limits(residual_proj)
+        residual_ax.set_ylim(lower, upper)
+        residual_ax.yaxis.set_major_locator(MaxNLocator(5))
+        # 刻度规范: 质量量级禁止 \times 10^n + m 偏移格式
+        residual_ax.ticklabel_format(axis="x", style="plain", useOffset=False)
+        main_ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+        residual_ax.set_xlabel(axis_label)
+        residual_ax.set_ylabel("data/model - 1")
+
+        projection_path = output_dir / f"{stem}_fit2d_projection_{axis_name}.pdf"
+        paths.append(projection_path)
+        figure.savefig(
+            projection_path,
+            metadata=_metadata(
+                sample_metadata, extra=f"2D fit {axis_name} projection: {stem}"
+            ),
+        )
+        plt.close(figure)
+
+    return paths
+
+
+# ---------------------------------------------------------------------------
+# 9.3 transfer 汇总
+# ---------------------------------------------------------------------------
+
+
+def _jsonable(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _jsonable(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def write_transfer_summary(
-    named_results: dict[str, TransferFactor1D | TransferFactors2D],
+    named_results: Sequence[Mapping],
     *,
-    analysis_metadata: dict,
-    output_dir,
+    analysis_metadata: Mapping,
+    output_dir: Path | str,
     stem: str = "transfer_factors",
-) -> ReportArtifacts:
-    """Write self-explaining JSON, Markdown, and coefficient comparison figures."""
-    import matplotlib.pyplot as plt
+) -> list[Path]:
+    """汇总所有作用域的 transfer 结果，输出 Markdown / JSON / PDF。
 
-    if not named_results:
-        raise ValueError("named_results must contain at least one transfer result")
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    generated_utc = datetime.now(timezone.utc).isoformat()
-    records, plot_labels, plot_values, plot_errors = {}, [], [], []
-    markdown = ["# Sideband transfer coefficients", "", f"Generated UTC: `{generated_utc}`", "", "| Scope | Quantity | Value | Statistical fit uncertainty |", "|---|---|---:|---:|"]
-    for name, result in named_results.items():
-        if isinstance(result, TransferFactor1D):
-            records[name] = {
-                "kind": "one_dimensional",
-                "regions": {"signal": result.regions.signal, "sideband_low": result.regions.sideband_low, "sideband_high": result.regions.sideband_high},
-                "integrals": {"signal": result.integral_signal, "sideband_low": result.integral_sideband_low, "sideband_high": result.integral_sideband_high, "sideband_combined": result.integral_sideband_combined},
-                "r_low": result.r_low,
-                "r_high": result.r_high,
-                "r_combined": result.r_combined,
-                "variance_r_combined": result.variance_r_combined,
+    ``named_results`` 的每一项是包含以下 key 的映射::
+
+        label          结果名称
+        scope          作用域描述（category/subset 等）
+        fallback       fallback 来源描述（无则为 None）
+        regions_x      MassRegions1D（一维结果也用它）
+        regions_y      MassRegions1D 或 None
+        transfer_1d    TransferFactor1D 或 None
+        transfer_2d    TransferFactors2D 或 None
+    """
+    plt = _import_matplotlib()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = output_dir / f"{stem}.md"
+    json_path = output_dir / f"{stem}.json"
+    pdf_path = output_dir / f"{stem}.pdf"
+    paths = [markdown_path, json_path, pdf_path]
+
+    # ---- Markdown ----------------------------------------------------------
+    lines = ["# Sideband transfer factors", ""]
+    for key, value in analysis_metadata.items():
+        lines.append(f"- {key}: {value}")
+    lines.append("")
+    structured_entries = []
+    for entry in named_results:
+        label = str(entry["label"])
+        lines.append(f"## {label}")
+        lines.append(f"- scope: {entry.get('scope', '')}")
+        lines.append(
+            f"- fallback: {entry.get('fallback') or 'none'}"
+        )
+        regions_x: MassRegions1D = entry["regions_x"]
+        lines.append(f"- x regions: {', '.join(_format_regions(regions_x))}")
+        regions_y = entry.get("regions_y")
+        if regions_y is not None:
+            lines.append(f"- y regions: {', '.join(_format_regions(regions_y))}")
+        transfer_1d = entry.get("transfer_1d")
+        if transfer_1d is not None:
+            lines.append("- 1D transfer:")
+            lines.append(
+                f"  - I_S = {transfer_1d.integral_signal:.6g}"
+            )
+            for key, value in (
+                ("I_L", transfer_1d.integral_sideband_low),
+                ("I_H", transfer_1d.integral_sideband_high),
+            ):
+                if value is not None:
+                    lines.append(f"  - {key} = {value:.6g}")
+            lines.append(
+                f"  - I_B = {transfer_1d.integral_sideband_combined:.6g}"
+            )
+            for key, value in (
+                ("r_L", transfer_1d.r_low),
+                ("r_H", transfer_1d.r_high),
+            ):
+                if value is not None:
+                    lines.append(f"  - {key} = {value:.6g}")
+            lines.append(
+                f"  - r = {transfer_1d.r_combined:.6g} "
+                f"± {transfer_1d.sigma_r_combined:.2g}"
+            )
+            lines.append(
+                f"  - background: `{transfer_1d.background_formula}`"
+            )
+        transfer_2d = entry.get("transfer_2d")
+        if transfer_2d is not None:
+            lines.append("- 2D transfer:")
+            lines.append("  - atomic region integrals:")
+            for key, values in transfer_2d.atomic_region_integrals.items():
+                entries = ", ".join(
+                    f"{name}={value:.4g}" for name, value in values.items()
+                )
+                lines.append(f"    - {key[0]}{key[1]}: {entries}")
+            lines.append("  - aggregated integrals:")
+            for component, values in transfer_2d.aggregated_region_integrals.items():
+                entries = ", ".join(
+                    f"{key}={value:.4g}" for key, value in values.items()
+                )
+                lines.append(f"    - {component}: {entries}")
+            sigma_w = np.sqrt(
+                np.clip(np.diag(transfer_2d.weight_covariance), 0.0, None)
+            )
+            lines.append(
+                f"  - w_H = {transfer_2d.w_H:.6g} ± {sigma_w[0]:.2g}"
+            )
+            lines.append(
+                f"  - w_V = {transfer_2d.w_V:.6g} ± {sigma_w[1]:.2g}"
+            )
+            lines.append(
+                f"  - w_C = {transfer_2d.w_C:.6g} ± {sigma_w[2]:.2g}"
+            )
+            lines.append(
+                f"  - closure w_C + w_H*w_V = "
+                f"{transfer_2d.factorization_closure:.4g}"
+            )
+            lines.append("  - signal leakage:")
+            for key, value in transfer_2d.signal_leakage_by_region.items():
+                lines.append(f"    - {key[0]}{key[1]}: {value:.4g}")
+        lines.append("")
+    markdown_path.write_text("\n".join(lines), encoding="utf-8")
+
+    # ---- JSON --------------------------------------------------------------
+    for entry in named_results:
+        structured_entries.append(
+            {
+                "label": str(entry["label"]),
+                "scope": entry.get("scope", ""),
+                "fallback": entry.get("fallback"),
+                "regions_x": _jsonable(entry["regions_x"]),
+                "regions_y": _jsonable(entry.get("regions_y")),
+                "transfer_1d": _jsonable(entry.get("transfer_1d")),
+                "transfer_2d": _jsonable(entry.get("transfer_2d")),
             }
-            markdown.append(f"| `{name}` | $r$ | {result.r_combined:.8g} | {result.sigma_r_combined:.3g} |")
-            plot_labels.append(r"$r$")
-            plot_values.append(result.r_combined)
-            plot_errors.append(result.sigma_r_combined)
-        elif isinstance(result, TransferFactors2D):
-            errors = np.sqrt(np.maximum(np.diag(result.weight_covariance), 0.0))
-            records[name] = {
-                "kind": "two_dimensional",
-                "x_regions": {"signal": result.x_regions.signal, "sideband_low": result.x_regions.sideband_low, "sideband_high": result.x_regions.sideband_high},
-                "y_regions": {"signal": result.y_regions.signal, "sideband_low": result.y_regions.sideband_low, "sideband_high": result.y_regions.sideband_high},
-                "weights": {"w_H": result.w_H, "w_V": result.w_V, "w_C": result.w_C},
-                "weight_covariance": result.weight_covariance.tolist(),
-                "weight_correlation": result.weight_correlation.tolist(),
-                "atomic_region_integrals": result.atomic_region_integrals,
-                "aggregated_region_integrals": result.aggregated_region_integrals,
-                "factorization_closure": result.factorization_closure,
-                "signal_leakage_by_region": result.signal_leakage_by_region,
-            }
-            for quantity, value, error in zip(("w_H", "w_V", "w_C"), (result.w_H, result.w_V, result.w_C), errors):
-                markdown.append(f"| `{name}` | ${quantity}$ | {value:.8g} | {error:.3g} |")
-                plot_labels.append(rf"${quantity}$")
-                plot_values.append(value)
-                plot_errors.append(error)
+        )
+    import json
+
+    json_path.write_text(
+        json.dumps(
+            {
+                "analysis_metadata": _jsonable(analysis_metadata),
+                "results": structured_entries,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    # ---- PDF 汇总表 --------------------------------------------------------
+    figure = plt.figure(figsize=(8.5, 2.2 + 0.5 * len(named_results)))
+    ax = figure.add_subplot(1, 1, 1)
+    ax.axis("off")
+    cell_text = []
+    for entry in named_results:
+        transfer_1d = entry.get("transfer_1d")
+        transfer_2d = entry.get("transfer_2d")
+        r_text = (
+            f"{transfer_1d.r_combined:.4f} ± {transfer_1d.sigma_r_combined:.4f}"
+            if transfer_1d is not None
+            else "-"
+        )
+        if transfer_2d is not None:
+            sigma_w = np.sqrt(
+                np.clip(np.diag(transfer_2d.weight_covariance), 0.0, None)
+            )
+            w_text = (
+                f"{transfer_2d.w_H:.4f}±{sigma_w[0]:.4f} / "
+                f"{transfer_2d.w_V:.4f}±{sigma_w[1]:.4f} / "
+                f"{transfer_2d.w_C:.4f}±{sigma_w[2]:.4f}"
+            )
         else:
-            raise TypeError(f"{name}: unsupported transfer result type {type(result).__name__}")
-    document = {
-        "schema_version": "datafactory_sideband_transfer_v1",
-        "generated_utc": generated_utc,
-        "produced_by": "datafactory.stat.sideband_ana.report.write_transfer_summary",
-        "analysis_metadata": analysis_metadata,
-        "results": records,
-    }
-    json_path = output_path / f"{stem}.json"
-    markdown_path = output_path / f"{stem}.md"
-    json_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    markdown.extend(("", "The quoted uncertainty is propagated from the final fit covariance. The signed corner coefficient is an inclusion-exclusion weight, not a probability.", ""))
-    markdown_path.write_text("\n".join(markdown), encoding="utf-8")
-
-    _apply_datafactory_style()
-    figure, axis = plt.subplots(figsize=(6.0, 4.5))
-    positions = np.arange(len(plot_values))
-    axis.errorbar(positions, plot_values, yerr=plot_errors, color="black", marker="o", markersize=3.0, capsize=3.0, capthick=0.64, elinewidth=0.8, linestyle="")
-    axis.axhline(0.0, color="black", linewidth=0.8)
-    axis.set_xticks(positions, plot_labels)
-    axis.set_xlim(-0.5, len(plot_values) - 0.5)
-    axis.set_ylabel(r"$\text{Transfer coefficient}$")
-    axis.set_box_aspect(3 / 4)
-    axis.grid(False)
-    _add_delphi_header(axis, analysis_metadata, has_data=analysis_metadata.get("sample", "data") == "data")
-    values_array, errors_array = np.asarray(plot_values), np.asarray(plot_errors)
-    lower, upper = float(np.min(values_array - errors_array)), float(np.max(values_array + errors_array))
-    padding = max(0.2, 0.25 * (upper - lower))
-    axis.set_ylim(lower - padding, max(upper + padding, lower + 4.0 * padding))
-    caption = "Transfer factors obtained by integrating the final fitted background model over the manually specified signal and sideband regions. Error bars propagate the final fit covariance; the signed corner term implements two-dimensional inclusion-exclusion."
-    figure_paths = _save_figure(figure, output_path / stem, caption, "datafactory.stat.sideband_ana.report.write_transfer_summary")
+            w_text = "-"
+        cell_text.append([str(entry["label"]), r_text, w_text])
+    ax.table(
+        cellText=cell_text,
+        colLabels=["label", "r (1D)", "w_H / w_V / w_C (2D)"],
+        cellLoc="center",
+        loc="upper center",
+    )
+    figure.suptitle("Sideband transfer factors", fontsize="medium")
+    figure.savefig(pdf_path, metadata=_metadata(analysis_metadata))
     plt.close(figure)
-    return ReportArtifacts(files=(json_path, markdown_path, *figure_paths), captions={stem: caption})
+
+    return paths
