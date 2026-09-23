@@ -282,6 +282,7 @@ def write_fit_report_2d(
     sample_metadata: Mapping,
     output_dir: Path | str,
     stem: str,
+    plane_figsize: tuple[float, float] = (11.5, 4.4),
 ) -> list[Path]:
     """输出二维质量平面拟合报告。
 
@@ -406,7 +407,7 @@ def write_fit_report_2d(
     # ---- 平面三联图（单页 PDF；data/model 共享色标） ------------------------
     plane_path = output_dir / f"{stem}_fit2d_plane.pdf"
     paths.append(plane_path)
-    figure = plt.figure(figsize=(11.5, 4.4))
+    figure = plt.figure(figsize=plane_figsize)
     grid = figure.add_gridspec(1, 3, wspace=0.55)
     axes = [figure.add_subplot(grid[0, index]) for index in range(3)]
     vmax_common = float(max(observed.max(), model.max()))
@@ -425,8 +426,11 @@ def write_fit_report_2d(
                     label="candidates / bin")
     figure.colorbar(mesh_ratio, ax=axes[2], shrink=0.9)
     for ax in axes:
+        ax.set_box_aspect(1)
         if same_quantity:
             ax.set_aspect("equal")
+        # 刻度规范: 质量量级禁止 \times 10^n + m 偏移格式
+        ax.ticklabel_format(axis="both", style="plain", useOffset=False)
         ax.set_xlabel(x_label, fontsize="small")
         ax.set_ylabel(y_label, fontsize="small")
     if transfer_result is not None:
@@ -580,6 +584,9 @@ def write_fit_report_2d(
         lower, upper = _residual_axes_limits(residual_proj)
         residual_ax.set_ylim(lower, upper)
         residual_ax.yaxis.set_major_locator(MaxNLocator(5))
+        # 刻度规范: 质量量级禁止 \times 10^n + m 偏移格式
+        residual_ax.ticklabel_format(axis="x", style="plain", useOffset=False)
+        main_ax.ticklabel_format(axis="y", style="plain", useOffset=False)
         residual_ax.set_xlabel(axis_label)
         residual_ax.set_ylabel("data/model - 1")
 
