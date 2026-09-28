@@ -392,16 +392,42 @@ class HistStaff(Staff):
     def get_norm_factor(self, count: float):
         return count / self.histogram.Integral()
 
-    def plot(self, xlabel, ax = None, stair_args = {}):
+    def plot(self, xlabel, ax=None, stair_args=None, *, style="stairs"):
+        """Plot a histogram on *ax* using one of the supported 1D styles.
+
+        ``stairs`` keeps the original outline; ``errorbar`` shows each bin's
+        content and ROOT error at its center; ``hatched`` adds a statistical
+        uncertainty band spanning ``content ± error`` around an MC-style outline.
+        ``stair_args`` customizes the outline in ``stairs`` and ``hatched`` modes.
+
+        Example: ``hist.plot("Energy [GeV]", ax=ax, style="hatched")``.
+        """
         import matplotlib.pyplot as plt
 
-
+        if style not in ("stairs", "errorbar", "hatched"):
+            raise ValueError(f"Unknown histogram plot style: {style!r}")
+        if self.dimension == 2 and style != "stairs":
+            raise ValueError(f"Plot style {style!r} only supports 1D histograms")
         if ax is None:
             ax = plt.figure().subplots(1)
         
         if self.dimension == 1:
             x, y, yerr, edge = self.get_numpy()
-            ax.stairs(y, edge, label = "$" + self.name + "$", **stair_args)
+            label = "$" + self.name + "$"
+            stair_args = {} if stair_args is None else stair_args
+            if style == "stairs":
+                ax.stairs(y, edge, label=label, **stair_args)
+            elif style == "errorbar":
+                ax.errorbar(x, y, xerr=0, yerr=yerr, label=label,
+                            marker="o", ms=1.5, color="black", ls="", lw=0.4)
+            else:
+                ax.stairs(y, edge, label=label,
+                          **{"lw": 0.6, "alpha": 1, "color": "black", **stair_args})
+                # The bar height is 2σ and its bottom is y−σ, so its hatch
+                # covers exactly the per-bin statistical interval [y−σ, y+σ].
+                ax.bar(x, 2*yerr, width=np.diff(edge), bottom=y-yerr,
+                       hatch="//////////", hatch_linewidth=0.6,
+                       fill=False, lw=0, ls="", facecolor="gray", alpha=0.6)
         elif self.dimension == 2:
             x, y, z, zerr = self.get_numpy()
             c = ax.pcolormesh(x,y,z)

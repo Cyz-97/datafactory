@@ -216,6 +216,7 @@ class FitResult2D:
     component_models: list[ComponentModel2D]
     x_background_formula: str = ""
     y_background_formula: str = ""
+    signal_yield_profile_interval: tuple[float, float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +684,7 @@ def fit_mass_plane_2d(
     y_seed: FitResult1D | None = None,
     fit_nbins: int,
     random_seed: int = 0,
+    profile_signal_yield: bool = False,
 ) -> FitResult2D:
     """拟合计数质量平面：SxSy / BxSy / SxBy / BxBy 四分量模型。
 
@@ -690,6 +692,7 @@ def fit_mass_plane_2d(
     由一维结果标定）固定，本底形状参数跨时期共享并浮动。
     ``y_seed=None`` 表示两轴共享同一套一维模型（要求两轴 binning 一致）。
     损失为逐时期 extended Poisson binned NLL。
+    ``profile_signal_yield=True`` 仅对单时期的 N_SxSy 计算 68.3% MINOS 区间。
     """
     x_edges = np.asarray(x_edges, dtype=float)
     y_edges = np.asarray(y_edges, dtype=float)
@@ -699,6 +702,8 @@ def fit_mass_plane_2d(
     if counts_by_period.ndim != 3:
         raise ValueError("counts_by_period 形状应为 (n_periods, n_xbins, n_ybins)")
     n_periods, n_xbins, n_ybins = counts_by_period.shape
+    if profile_signal_yield and n_periods != 1:
+        raise ValueError("N_SS 轮廓区间目前只支持单时期质量平面")
     if x_edges.size != n_xbins + 1 or y_edges.size != n_ybins + 1:
         raise ValueError("x_edges / y_edges 长度与 counts_by_period 不匹配")
     if not np.all(np.isfinite(counts_by_period)) or np.any(
@@ -1284,6 +1289,32 @@ def fit_mass_plane_2d(
         ComponentModel2D("BxBy", background_pdf_x, background_pdf_y),
     ]
 
+    # MINOS 在固定 N_SS 时重新极小化其余本底与产额参数；边界处的区间
+    # 因而不需要把协方差误差的负半轴解释为物理产额。默认关闭以免拖慢批量拟合。
+    signal_yield_profile_interval = None
+    if profile_signal_yield:
+        signal_parameter = yield_lookup[0]["SxSy"]
+        try:
+            profile_errors, new_result = result.errors(
+                params=[signal_parameter], method="minuit_minos", cl=0.682689492
+            )
+            profile = profile_errors[signal_parameter]
+            if new_result is not None:
+                fit_converged = False
+                raise RuntimeError("MINOS 找到了新的极小值，原拟合已标记为未收敛")
+            if not profile["is_valid"]:
+                raise RuntimeError("MINOS 未能给出有效的 N_SS 区间")
+            signal_yield = component_yields[0]["SxSy"]
+            signal_yield_profile_interval = (
+                max(0.0, signal_yield + float(profile["lower"])),
+                signal_yield + float(profile["upper"]),
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"N_SS 轮廓区间缺失，保留原拟合中心值与协方差误差：{exc!r}",
+                RuntimeWarning,
+            )
+
     return FitResult2D(
         x_edges=x_edges,
         y_edges=y_edges,
@@ -1315,4 +1346,5 @@ def fit_mass_plane_2d(
         component_models=component_models,
         x_background_formula=background_model_x.formula,
         y_background_formula=background_model_y.formula,
+        signal_yield_profile_interval=signal_yield_profile_interval,
     )
