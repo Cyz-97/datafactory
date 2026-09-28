@@ -217,6 +217,8 @@ class FitResult2D:
     x_background_formula: str = ""
     y_background_formula: str = ""
     signal_yield_profile_interval: tuple[float, float] | None = None
+    n_floating_parameters: int = 0
+    parameters_at_limit: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1003,10 @@ def fit_mass_plane_2d(
     result = zfit.minimize.Minuit(
         tol=1.0e-3, mode=2, maxiter=10_000, verbosity=0
     ).minimize(loss)
-    fit_converged = bool(result.converged and result.valid)
+    # zfit.valid also rejects physical zero-yield boundaries. Keep Minuit's
+    # numerical validity checks (EDM/call limit/covariance), and report limits
+    # separately so a constrained maximum at N_SS=0 is not discarded.
+    fit_converged = bool(result.converged and result.info["original"].is_valid)
     if not fit_converged:
         warnings.warn(f"zfit 二维拟合未收敛: {result}；返回当前参数值", RuntimeWarning)
 
@@ -1016,9 +1021,8 @@ def fit_mass_plane_2d(
     if floating_covariance.shape != (len(floating_parameters),) * 2 or not np.all(
         np.isfinite(floating_covariance)
     ):
-        warnings.warn("zfit 返回的二维 covariance 无效，使用零矩阵", RuntimeWarning)
-        floating_covariance = np.zeros((len(floating_parameters),) * 2, dtype=float)
-        fit_converged = False
+        warnings.warn("zfit 返回的二维 covariance 无效，误差标记为 NaN", RuntimeWarning)
+        floating_covariance = np.full((len(floating_parameters),) * 2, np.nan)
 
     # ---- 参数汇总（干净名字，顺序与 all_parameters 一致） ------------------
     if shared_axes:
@@ -1032,6 +1036,17 @@ def fit_mass_plane_2d(
             + bg_names_x
             + bg_names_y
             + yield_parameter_names
+        )
+    parameters_at_limit = tuple(
+        name for name, parameter in zip(
+            parameter_names[len(fixed_parameters):], floating_parameters
+        ) if bool(parameter.at_limit)
+    )
+    if parameters_at_limit:
+        warnings.warn(
+            f"二维拟合参数触边（与数值收敛分开记录）: {parameters_at_limit}；"
+            "零产额应使用 profile 区间，本底或产额上限触边需检查模型",
+            RuntimeWarning,
         )
     parameter_values = np.asarray(fixed_values + floating_values, dtype=float)
     covariance = np.zeros((len(parameter_values),) * 2, dtype=float)
@@ -1311,7 +1326,7 @@ def fit_mass_plane_2d(
             )
         except Exception as exc:
             warnings.warn(
-                f"N_SS 轮廓区间缺失，保留原拟合中心值与协方差误差：{exc!r}",
+                f"N_SS 轮廓区间缺失，保留中心值；协方差误差不能代替边界区间：{exc!r}",
                 RuntimeWarning,
             )
 
@@ -1347,4 +1362,6 @@ def fit_mass_plane_2d(
         x_background_formula=background_model_x.formula,
         y_background_formula=background_model_y.formula,
         signal_yield_profile_interval=signal_yield_profile_interval,
+        n_floating_parameters=len(floating_parameters),
+        parameters_at_limit=parameters_at_limit,
     )
