@@ -6,8 +6,14 @@ event loops rather than wall time, so these checks do not depend on disk caches.
 # %% Definitions and unchanged cuts must reuse the booked selection count.
 from copy import copy, deepcopy
 
+import sys
+
 import numpy as np
 import ROOT as R
+
+# Optional N verifies the same lazy contract with N ROOT worker slots.
+if len(sys.argv) > 1:
+    R.EnableImplicitMT(int(sys.argv[1]))
 
 from datafactory.core import StaffType
 from datafactory.hist import HistFactory, HistStaff
@@ -75,3 +81,19 @@ physical_copy.histogram.Scale(4)
 assert physical_copy.histogram.Integral() == 800 and hist.histogram.Integral() == 200
 np.testing.assert_array_equal((hist * 0.5).get_numpy()[1], np.full(10, 10.))
 print("PASS: count invalidation, joint lazy booking, 1D/2D/3D dimensions and independent copies")
+
+# %% Weighted fills and Sumw2 merge correctly across IMT slots (roundoff only).
+node = R.RDataFrame(1000).Define("x", "double(rdfentry_ % 10)")
+node = node.Define("weight", "double((rdfentry_ % 7) + 1) / 13.")
+weighted = HistStaff("weighted", histogram=node.Histo1D(("weighted", "", 10, 0., 10.), "x", "weight"))
+assert node.GetNRuns() == 0
+histogram = weighted.histogram
+indices = np.arange(1000)
+weights = ((indices % 7) + 1) / 13.
+np.testing.assert_allclose([histogram.GetBinContent(index) for index in range(1, 11)],
+                           np.bincount(indices % 10, weights=weights), rtol=1e-13)
+np.testing.assert_allclose([histogram.GetBinError(index)**2 for index in range(1, 11)],
+                           np.bincount(indices % 10, weights=weights**2), rtol=1e-13)
+assert node.GetNRuns() == 1
+assert node.GetNSlots() == (int(sys.argv[1]) if len(sys.argv) > 1 else 1)
+print(f"PASS: weighted counts/Sumw2 with {node.GetNSlots()} slot(s)")
