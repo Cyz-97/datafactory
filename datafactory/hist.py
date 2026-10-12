@@ -175,10 +175,29 @@ class HistStaff(Staff):
     def __post_init__(self):
         self.load()
 
+    def __getattribute__(self, name):
+        """Materialize RDF histograms at first use, with independent ownership.
+
+        Booking/copying a HistStaff does not run the RDF. Public histogram
+        access (including Scale/Clone) realizes a private TH1, so a lazy copy
+        still sees the original RDF result when another copy is modified.
+        Example: book several ``get_histstaff`` results, then call get_numpy.
+        """
+        value = object.__getattribute__(self, name)
+        if name == "histogram" and hasattr(type(value), "GetValue"):
+            value = value.GetValue().Clone()
+            value.SetDirectory(R.nullptr)
+            object.__setattr__(self, name, value)
+        elif name == "dimension" and value is None:
+            value = self.histogram.GetDimension()
+            object.__setattr__(self, name, value)
+        return value
+
     def load(self):
-        if self.histogram is not None:
-            self.dimension = self.histogram.GetDimension()
-            pass
+        histogram = object.__getattribute__(self, "histogram")
+        if histogram is not None:
+            # GetDimension on RResultPtr dereferences it and starts an event loop.
+            self.dimension = None if hasattr(type(histogram), "GetValue") else histogram.GetDimension()
         elif self.path is not None:
             if ":" in self.path:
                 path, obj_name = self.path.split(":", 1)
@@ -216,10 +235,10 @@ class HistStaff(Staff):
         # ToDO: save weight information; mkdir directory to separate different distributions
 
     def _get_value(self, obj: Self):
-        try: 
-            obj.histogram = obj.histogram.GetValue()
-        except Exception as e:
-            pass
+        # Public access realizes a lazy result; ROOT execution errors propagate.
+        # Scalar operands are intentionally ignored, as in multiplication.
+        if isinstance(obj, HistStaff):
+            obj.histogram
         
     def __add__(self, other: Self):
 
@@ -281,18 +300,21 @@ class HistStaff(Staff):
         return res
     
     def __copy__(self):
-        self._get_value(self)
+        """Share immutable RDF results until first use; clone physical TH1s."""
+        histogram = object.__getattribute__(self, "histogram")
+        if not hasattr(type(histogram), "GetValue"):
+            histogram = histogram.Clone()
+            histogram.SetDirectory(R.nullptr)
         return HistStaff(name=self.name, 
-                         histogram=self.histogram.Clone(),
+                         histogram=histogram,
                          type = self.type)
     
     def __deepcopy__(self, memo):
-        new = type(self).__new__(type(self))
+        # ROOT histograms have no recursive Python fields; copy preserves the
+        # same independent TH1 semantics without dereferencing booked results.
+        new = copy(self)
         memo[id(self)] = new
-        self._get_value(self)
-        return HistStaff(name=self.name, 
-                         histogram=self.histogram.Clone(),
-                         type = self.type)
+        return new
     
     def get_eff(self, other: Self):
         self._get_value(self)

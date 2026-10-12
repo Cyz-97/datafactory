@@ -169,6 +169,10 @@ class RDFStaff(Staff):
     cuts: List[CutFlow] = field(default_factory=list, init=False)
     # core RDataFrame
     rdf: Any = field(init=False, repr=False)
+    # Selection results belong to this exact input node and declarative cut list.
+    # Keep ROOT's booked Count, not a boolean that could outlive a changed cut.
+    _cuts_rdf: Any = field(default=None, init=False, repr=False)
+    _cut_specs: Any = field(default=None, init=False, repr=False)
     
     # initial dictionary of rdf, used to avoid reuse,
     # thereby improving the efficiency of the code
@@ -233,10 +237,7 @@ class RDFStaff(Staff):
         #    (copy only declarative parts; then apply_on_rdf to create fresh ROOT handles)
         new.cuts = []
         if new.rdf is not None and getattr(self, "cuts", None):
-            for cf in self.cuts:
-                cf_copy = deepcopy(cf, memo)   # uses the CutFlow deepcopy above
-                cf_copy.apply_on_rdf(new.rdf if len(new.cuts) == 0 else new.cuts[-1].sample_final)
-                new.cuts.append(cf_copy)
+            new.set_cuts(deepcopy(self.cuts, memo))
 
         # 7) optional cosmetic cache
         new._column_names = list(getattr(self, "_column_names", []))
@@ -486,17 +487,25 @@ class RDFStaff(Staff):
         import copy
 
         if self.rdf != None:
-            self.cuts = copy.deepcopy(cuts)
-
-            if len(self.cuts) == 0:
+            if len(cuts) == 0:
                 init_cut = CutFlow(name = "Init", list_bystander={},
                             formular = "true", latex = r"\text{Init}")
-                self.cuts = [init_cut]
-                
+                cuts = [init_cut]
+            specs = [(cut.name, cut.formular, cut.latex, list(cut.list_bystander.items())) for cut in cuts]
+            try:
+                unchanged = specs == self._cut_specs
+            except (TypeError, ValueError):
+                # Array-valued binning may have no scalar equality; rebuild it.
+                unchanged = False
+            if self._cuts_rdf is self.rdf and unchanged:
+                return
+            self.cuts = copy.deepcopy(cuts)
+            self._cut_specs = copy.deepcopy(specs)
             iter_rdf = R.RDF.AsRNode(self.rdf)
             for cut in self.cuts:
                 cut.apply_on_rdf(iter_rdf)
                 iter_rdf = R.RDF.AsRNode(cut.sample_final)
+            self._cuts_rdf = self.rdf
         else:
             print("set_cuts(): There is no RDF.")
 
@@ -592,30 +601,35 @@ class RDFStaff(Staff):
         return res
 
     def empty(self):
+        """Reuse the selection Count; input/cut changes book a fresh result.
+
+        For example, repeated ``factory.define(...)`` calls need only one
+        emptiness scan. ``set_cuts`` and input replacement invalidate the count.
+        """
         if self.rdf is None:
             return True
         elif len(self.cuts) > 0:
-            if self.cuts[-1].sample_final.Count().GetValue() == 0:
-                return True
-            else:
-                return False
-        elif list(self.pre_cut_chain.values())[-1] == 0:
-            return True
-        # elif self.rdf.Count().GetValue() == 0:
-        #     return True
-        else:
-            return False
+            self.set_cuts(self.cuts)
+            return self.cuts[-1].count_final.GetValue() == 0
+        elif self.pre_cut_chain:
+            return list(self.pre_cut_chain.values())[-1] == 0
+        return self.rdf.Count().GetValue() == 0
     
     def define(self, branch_name: str, func_str: str):
+        """Add a column without rescanning; Redefine rebuilds dependent cuts."""
+        if self.cuts:
+            self.set_cuts(self.cuts)
         if branch_name in self.rdf.GetColumnNames():
             self.rdf = self.rdf.Redefine(branch_name, func_str)
             if (len(self.cuts) > 0):
-                self.cuts[-1].sample_final = self.cuts[-1].sample_final.Redefine(branch_name, func_str)
+                # A redefined input can change a filter or its bystander histogram.
+                self.set_cuts(self.cuts)
         else: 
             self.rdf = self.rdf.Define(branch_name, func_str)
             if (len(self.cuts) > 0):
                 self.cuts[-1].sample_final = self.cuts[-1].sample_final.Define(branch_name, func_str)
-            # self._column_names = self.rdf.GetColumnNames()
+                # A new column cannot change already evaluated filter inputs.
+                self._cuts_rdf = self.rdf
     
     
 @dataclass
